@@ -1,0 +1,32 @@
+cabal-version: 2.2
+name: rotera
+version: 0.1.0.0
+synopsis: persistent rotating queue
+description:
+  This library provides a persistent rotating queue. The oldest
+  entries are phased out once a configurable amount of new data
+  has been written to the queue. This is similar to what Apache
+  Kafka does. However, unlike Kafka, this queue is not distributed
+  across multiple hosts. By design, it can only live on a single
+  host.
+homepage: https://github.com/andrewthad/rotera
+bug-reports: https://github.com/andrewthad/rotera/issues
+license: BSD-3-Clause
+license-file: LICENSE
+author: Andrew Martin
+maintainer: andrew.thaddeus@gmail.com
+-- copyright:
+category: Database
+extra-source-files:  CHANGELOG.md
+
+library
+  -- exposed-modules:
+  -- other-modules:
+  -- other-extensions:
+  build-depends:
+    , base >= 4.11.1.0
+    , mmap >= 0.5.9
+    , primitive >= 0.6.4
+  hs-source-dirs: src
+  ghc-options: -O2
+  default-language: Haskell2010
