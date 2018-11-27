@@ -20,13 +20,28 @@ category: Database
 extra-source-files:  CHANGELOG.md
 
 library
-  -- exposed-modules:
+  exposed-modules: Rotera
   -- other-modules:
   -- other-extensions:
   build-depends:
     , base >= 4.11.1.0
     , mmap >= 0.5.9
     , primitive >= 0.6.4
+    , bytestring >= 0.10.8.2
+    , directory >= 1.3.3
   hs-source-dirs: src
-  ghc-options: -O2
+  ghc-options: -O2 -Wall
   default-language: Haskell2010
+
+test-suite test
+  Default-Language: Haskell2010
+  hs-source-dirs: test
+  main-is: Main.hs
+  type: exitcode-stdio-1.0
+  build-depends:
+    , base >= 4.11.1.0
+    , rotera
+    , tasty
+    , tasty-hunit
+    , directory
+  ghc-options: -O2
