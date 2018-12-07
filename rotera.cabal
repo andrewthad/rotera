@@ -44,4 +44,8 @@ test-suite test
     , tasty
     , tasty-hunit
     , directory
-  ghc-options: -O2
+    , bytestring
+    , primitive
+    , containers
+    , random
+  ghc-options: -O2 -Wall

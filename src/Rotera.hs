@@ -87,11 +87,10 @@ data Rotera = Rotera
   -- helps prevent contention.
   !(PM.MVar RealWorld (PM.MutablePrimArray RealWorld Int))
   -- This is the reader and writer lock. It contains an array of all event numbers
-  -- in use. The zero-index element is special and communicates the oldest active
-  -- event number. Readers use this number to determine what they are allowed to
-  -- read. The writer updates this number every time it begins acquiring this
-  -- lock. That means that the number is incremented before the actual deletions
-  -- happen. So, it is possible that the lowest event number in the remainder of
+  -- in use. The writer updates the minimal event number every time before it
+  -- attempts to acquire the lock. That means that the number
+  -- is incremented before the actual deletions
+  -- happen. So, it is possible that the lowest event number in
   -- the array is lower than the oldest active id. That is fine since the writer
   -- will keep reacquiring the lock until the old reader has dropped out.
   -- The preemptive bump of the oldest active event number means that new
@@ -131,7 +130,7 @@ data Settings = Settings
 
 new :: Settings -> IO Rotera
 new (Settings maxEventBytes0 maximumEvents0 deadZoneEvents0 path) = do
-  let maxEventBytes = max (4096 * 16) (div maxEventBytes0 4096 * 4096)
+  let maxEventBytes = max 4096 (div maxEventBytes0 4096 * 4096)
       maximumEvents = max 1024 (div maximumEvents0 1024 * 1024)
       deadZoneEvents = min (max 2 deadZoneEvents0) (div maximumEvents 2)
       expected = fromIntegral (4096 + maxEventBytes + (maximumEvents * PM.sizeOf (undefined :: Addr)))
@@ -148,10 +147,8 @@ new (Settings maxEventBytes0 maximumEvents0 deadZoneEvents0 path) = do
       when (offset /= 0) (fail "Rotera.new: mmapped file had non-size offset")
       header <- PM.readOffAddr base 0
       when (header /= magicHeader) (fail "Rotera.new: magic header was invalid")
-      lowestEvent <- PM.readOffAddr base 1
       reattemptWrite <- PM.newEmptyMVar
-      m <- PM.newPrimArray 1
-      PM.writePrimArray m 0 lowestEvent
+      m <- PM.newPrimArray 0
       readWrite <- PM.newMVar m
       pure (Rotera base maxEventBytes maximumEvents deadZoneEvents readWrite reattemptWrite)
     else fail ("Rotera.new: expected size " ++ show expected ++ " but got size " ++ show actual)
@@ -172,7 +169,8 @@ magicHeader :: Word
 magicHeader = 0xcb242feb29866985
 
 debug :: String -> IO ()
-debug = putStrLn
+debug _ = pure ()
+-- debug = putStrLn
 
 -- Ensure that the dead zone is large enough to handle what is going
 -- to be written.
@@ -191,7 +189,8 @@ accomodate !r@(Rotera base maxEventBytes maximumEvents deadZoneEvents readWrite 
   -- let nextEventAddr = PM.plusAddr base (nextEventOffset + 4096)
   let eventCount = nextEvent - lowestEvent
   let deltaAddr0 = lowestEventOffset - nextEventOffset
-  let deltaAddr1 = if deltaAddr0 >= 0 then deltaAddr0 else maxEventBytes - deltaAddr0
+  let deltaAddr1 = if deltaAddr0 >= 0 then deltaAddr0 else maxEventBytes + deltaAddr0
+  debug ("making resize decision [event data max=" ++ show maxEventBytes ++ "][lowest offset=" ++ show lowestEventOffset ++ "][next offset=" ++ show nextEventOffset ++ "][remaining bytes: " ++ show deltaAddr1 ++ "]")
   if lowestEvent == 0 && nextEvent == 0
     then do
       debug "very first event"
@@ -201,11 +200,12 @@ accomodate !r@(Rotera base maxEventBytes maximumEvents deadZoneEvents readWrite 
         debug "enough space in buffer"
         pure (nextEvent,nextEventOffset)
       else do
-        debug ("adding more space to buffer: [lowest event=" ++ show lowestEvent ++ "][next event=" ++ show nextEvent ++ "]")
+        debug "adding more space to buffer"
         newLowestEvent <- accomodateLoop table (lowestEvent + deadZoneEvents) bytes maxEventBytes maximumEvents nextEventOffset
-        waitForReads newLowestEvent base readWrite reattemptWrite
+        debug ("decided new lowest event [new lowest event=" ++ show newLowestEvent ++ "]")
         PM.writeOffAddr base 1 newLowestEvent
         MM.mmapSynchronize (addrToPtr base) 4096
+        waitForReads newLowestEvent readWrite reattemptWrite
         pure (nextEvent,nextEventOffset)
 
 -- Returns the event id that needs to become the new minimum.
@@ -223,16 +223,13 @@ accomodateLoop resolution eventId bytes maxEventBytes maximumEvents off0 = do
 -- event id.
 waitForReads ::
      Int -- minimum event id
-  -> Addr -- base address
   -> PM.MVar RealWorld (PM.MutablePrimArray RealWorld Int) -- reader writer lock
   -> PM.MVar RealWorld () -- writer signal
   -> IO ()
-waitForReads expectedLowestEvent base readWrite reattemptWrite = do
+waitForReads expectedLowestEvent readWrite reattemptWrite = do
   _ <- PM.tryTakeMVar reattemptWrite
   m <- PM.takeMVar readWrite
-  lowestEvent <- PM.readOffAddr base 1
-  PM.writePrimArray m 0 lowestEvent
-  actualLowestEvent <- minimumLoop m maxBound 1 =<< PM.getSizeofMutablePrimArray m
+  actualLowestEvent <- minimumLoop m maxBound 0 =<< PM.getSizeofMutablePrimArray m
   PM.putMVar readWrite m
   if actualLowestEvent >= expectedLowestEvent
     then pure ()
@@ -251,7 +248,7 @@ waitForReadsLoop ::
 waitForReadsLoop expectedLowestEvent readWrite reattemptWrite = do
   PM.takeMVar reattemptWrite
   m <- PM.takeMVar readWrite
-  actualLowestEvent <- minimumLoop m maxBound 1 =<< PM.getSizeofMutablePrimArray m
+  actualLowestEvent <- minimumLoop m maxBound 0 =<< PM.getSizeofMutablePrimArray m
   PM.putMVar readWrite m
   if actualLowestEvent >= expectedLowestEvent
     then pure ()
@@ -293,6 +290,22 @@ removeEventIdLoop !m !eventId !ix !sz = if ix < sz
       else removeEventIdLoop m eventId (ix + 1) sz
   else fail "removeEventIdLoop did not find the identifier"
 
+-- | Push any number of events into the queue. The callback will be
+--   fed these arguments:
+--
+--   * An address into the data section of the queue
+--   * Maximum number of usable bytes (used to prevent overflow
+--     when the address is near the end of the queue)
+--
+--   The callback returns the number of events written into the queue.
+-- push ::
+--      Rotera -- ^ queue
+--   -> Int -- ^ total expected number of bytes
+--   -> PrimArray Int -- ^ sizes of the events
+--   -> (Addr -> Int -> IO Int) -- ^ callback that should not perform blocking IO
+--   -> IO ()
+-- push 
+
 -- | Push a single event onto the queue. Its persistence is guaranteed
 --   until 'flush' is called. This function is not thread-safe. It should
 --   always be called from the same writer thread.
@@ -314,7 +327,7 @@ push r@(Rotera base maxEventBytes maximumEvents deadZoneEvents _ _) !bs@(BSI.PS 
             PM.copyAddr (PM.plusAddr base (4096 + off)) src firstFragmentSize
             PM.copyAddr (PM.plusAddr base 4096) (PM.plusAddr src firstFragmentSize) (len - firstFragmentSize)
       PM.writeOffAddr (PM.plusAddr base (4096 + maxEventBytes)) (mod eventId maximumEvents) off
-      PM.writeOffAddr (PM.plusAddr base (4096 + maxEventBytes)) (mod (eventId + 1) maximumEvents) (off + len)
+      PM.writeOffAddr (PM.plusAddr base (4096 + maxEventBytes)) (mod (eventId + 1) maximumEvents) (mod (off + len) maxEventBytes)
       MM.mmapSynchronize (addrToPtr base) (fromIntegral (4096 + maxEventBytes + (maximumEvents * PM.sizeOf (undefined :: Addr))))
       PM.writeOffAddr base 2 (eventId + 1)
       MM.mmapSynchronize (addrToPtr base) 4096
@@ -343,8 +356,8 @@ read ::
   -> IO (Int,ByteString)
 read (Rotera base maxEventBytes maximumEvents _ readWrite reattemptWrite) !requestedEventId = do
   m <- PM.takeMVar readWrite
+  lowestEvent <- PM.readOffAddr base 1
   nextEvent <- PM.readOffAddr base 2
-  lowestEvent <- PM.readPrimArray m 0
   if nextEvent /= lowestEvent
     then do
       let actualEventId = min (nextEvent - 1) (max requestedEventId lowestEvent)
@@ -352,17 +365,26 @@ read (Rotera base maxEventBytes maximumEvents _ readWrite reattemptWrite) !reque
       PM.putMVar readWrite n
       off <- PM.readOffAddr (PM.plusAddr base (4096 + maxEventBytes)) (mod actualEventId maximumEvents)
       offNext <- PM.readOffAddr (PM.plusAddr base (4096 + maxEventBytes)) (mod (actualEventId + 1) maximumEvents)
-      let len = offNext - off
-      dst <- PM.newPinnedByteArray len
-      PM.copyAddrToByteArray dst 0 (PM.plusAddr base (4096 + off)) len
+      (dst,len) <- if offNext >= off
+        then do
+          let len = offNext - off
+          dst <- PM.newPinnedByteArray len
+          PM.copyAddrToByteArray dst 0 (PM.plusAddr base (4096 + off)) len
+          pure (dst,len)
+        else do
+          let len = maxEventBytes + (offNext - off)
+          dst <- PM.newPinnedByteArray len
+          PM.copyAddrToByteArray dst 0 (PM.plusAddr base (4096 + off)) (maxEventBytes - off)
+          PM.copyAddrToByteArray dst (maxEventBytes - off) (PM.plusAddr base 4096) offNext
+          pure (dst,len)
       m' <- PM.takeMVar readWrite
-      removeEventIdLoop m' actualEventId 1 =<< PM.getSizeofMutablePrimArray m'
+      removeEventIdLoop m' actualEventId 0 =<< PM.getSizeofMutablePrimArray m'
       PM.putMVar readWrite m'
       _ <- PM.tryPutMVar reattemptWrite ()
       pure (actualEventId,BSI.PS (FP.ForeignPtr (unAddr (PM.mutableByteArrayContents dst)) (FP.PlainPtr (unMutableByteArray dst))) 0 len)
     else do
       PM.putMVar readWrite m
-      pure (0,B.empty)
+      pure ((-1),B.empty)
 
 unMutableByteArray :: MutableByteArray s -> MutableByteArray# s
 unMutableByteArray (PM.MutableByteArray x) = x
