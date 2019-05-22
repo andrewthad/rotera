@@ -4,7 +4,8 @@
 {-# language LambdaCase #-}
 
 import Prelude hiding (read)
-import Rotera (Settings(..),new,push,pushMany,read,commit)
+import Rotera (Settings(..),new,push,pushMany,commit)
+import Rotera.Nonblocking as Nonblock
 
 import Control.Concurrent (forkIO)
 import Control.Exception (SomeException,try)
@@ -21,6 +22,8 @@ import System.Random (randomRIO)
 import Test.Tasty (defaultMain,testGroup)
 import Test.Tasty.HUnit (testCase,assertBool,(@?=))
 
+import qualified Data.List as L
+import qualified GHC.Exts as E
 import qualified Data.IORef as IO
 import qualified Data.ByteString.Char8 as BC
 import qualified Data.Set as S
@@ -39,18 +42,18 @@ main = defaultMain $ testGroup "rotera"
         r <- new settings
         push r "hello world"
         commit r
-        x <- read r 0
-        x @?= (0,"hello world")
+        x <- Nonblock.read r 0
+        x @?= Just (0,"hello world")
     , testCase "b" $ do
         DIR.removePathForcibly "example.bin"
         r <- new settings
         push r "hello"
         push r "world"
         commit r
-        x <- read r 0
-        y <- read r 1
-        x @?= (0,"hello")
-        y @?= (1,"world")
+        x <- Nonblock.read r 0
+        y <- Nonblock.read r 1
+        x @?= Just (0,"hello")
+        y @?= Just (1,"world")
     , testCase "c" $ do
         DIR.removePathForcibly "example.bin"
         r <- new settings
@@ -59,14 +62,14 @@ main = defaultMain $ testGroup "rotera"
         push r (B.replicate 1000 (c2w 'c'))
         push r (B.replicate 1000 (c2w 'd'))
         commit r
-        w <- read r 0
-        x <- read r 1
-        y <- read r 2
-        z <- read r 3
-        w @?= (0,B.replicate 1000 (c2w 'a'))
-        x @?= (1,B.replicate 1000 (c2w 'b'))
-        y @?= (2,B.replicate 1000 (c2w 'c'))
-        z @?= (3,B.replicate 1000 (c2w 'd'))
+        w <- Nonblock.read r 0
+        x <- Nonblock.read r 1
+        y <- Nonblock.read r 2
+        z <- Nonblock.read r 3
+        w @?= Just (0,B.replicate 1000 (c2w 'a'))
+        x @?= Just (1,B.replicate 1000 (c2w 'b'))
+        y @?= Just (2,B.replicate 1000 (c2w 'c'))
+        z @?= Just (3,B.replicate 1000 (c2w 'd'))
     , testCase "d" $ do
         DIR.removePathForcibly "example.bin"
         r <- new settings
@@ -76,12 +79,12 @@ main = defaultMain $ testGroup "rotera"
         push r (B.tail $ B.init $ "x" <> B.replicate 1000 (c2w 'd') <> "x")
         push r (B.take 1002 $ B.drop 2 $ "yyy" <> B.replicate 1000 (c2w 'e') <> "yyy")
         commit r
-        w <- read r 0
-        x <- read r 4
-        y <- read r 5
-        w @?= (3,B.replicate 1000 (c2w 'd'))
-        x @?= (4,"y" <> B.replicate 1000 (c2w 'e') <> "y")
-        y @?= (4,"y" <> B.replicate 1000 (c2w 'e') <> "y")
+        w <- Nonblock.read r 0
+        x <- Nonblock.read r 4
+        y <- Nonblock.read r 5
+        w @?= Just (3,B.replicate 1000 (c2w 'd'))
+        x @?= Just (4,"y" <> B.replicate 1000 (c2w 'e') <> "y")
+        y @?= Nothing
     , testCase "e" $ do
         let start = 470 :: Int
         DIR.removePathForcibly "example.bin"
@@ -90,18 +93,18 @@ main = defaultMain $ testGroup "rotera"
           let bytes = B.replicate i (fromIntegral i)
           push r bytes
           commit r
-          w <- read r (i - start)
-          w @?= (i - start,bytes)
+          w <- Nonblock.read r (i - start)
+          w @?= Just (i - start,bytes)
     , testCase "f" $ do
         DIR.removePathForcibly "example.bin"
         r <- new settings
         push r (B.take 9 (B.drop 1 "abcdefghijk"))
         push r "world"
         commit r
-        x <- read r 0
-        y <- read r 1
-        x @?= (0,"bcdefghij")
-        y @?= (1,"world")
+        x <- Nonblock.read r 0
+        y <- Nonblock.read r 1
+        x @?= Just (0,"bcdefghij")
+        y @?= Just (1,"world")
     , testCase "g" $ do
         DIR.removePathForcibly "example.bin"
         r <- new settings { settingsExpiredEntries = 5 }
@@ -124,14 +127,52 @@ main = defaultMain $ testGroup "rotera"
         pushMany r lens payloads
         push r (B.replicate 40 (c2w 'e'))
         commit r
-        x <- read r 8
-        x @?= (8,B.replicate 50 (c2w 'x'))
-        y <- read r 9
-        y @?= (9,B.replicate 90 (c2w 'y'))
-        z <- read r 10
-        z @?= (10,B.replicate 30 (c2w 'z'))
-        k <- read r 11
-        k @?= (11,B.replicate 40 (c2w 'e'))
+        x <- Nonblock.read r 8
+        x @?= Just (8,B.replicate 50 (c2w 'x'))
+        y <- Nonblock.read r 9
+        y @?= Just (9,B.replicate 90 (c2w 'y'))
+        z <- Nonblock.read r 10
+        z @?= Just (10,B.replicate 30 (c2w 'z'))
+        k <- Nonblock.read r 11
+        k @?= Just (11,B.replicate 40 (c2w 'e'))
+    , testCase "h" $ do
+        DIR.removePathForcibly "example.bin"
+        r <- new settings
+        push r (B.replicate 900 (c2w 'a'))
+        push r (B.replicate 900 (c2w 'b'))
+        push r (B.replicate 900 (c2w 'c'))
+        push r (B.replicate 900 (c2w 'd'))
+        push r (B.replicate 900 (c2w 'e'))
+        push r (B.replicate 40 (c2w 'f'))
+        push r (B.replicate 20 (c2w 'g'))
+        commit r
+        x <- Nonblock.readMany r 5 3
+        x @?= (5,E.fromList
+          [ E.fromList (L.replicate 40 (c2w 'f'))
+          , E.fromList (L.replicate 20 (c2w 'g'))
+          ])
+    , testCase "i" $ do
+        DIR.removePathForcibly "example.bin"
+        r <- new settings
+        push r (B.replicate 1000 (c2w 'a'))
+        push r (B.replicate 1000 (c2w 'b'))
+        push r (B.replicate 1000 (c2w 'c'))
+        push r (B.replicate 1000 (c2w 'd'))
+        push r (B.replicate 50 (c2w 'f'))
+        push r (B.replicate 30 (c2w 'g'))
+        push r (B.replicate 90 (c2w 'h'))
+        commit r
+        x <- Nonblock.readMany r 4 3
+        x @?= (4,E.fromList
+          [ E.fromList (L.replicate 50 (c2w 'f'))
+          , E.fromList (L.replicate 30 (c2w 'g'))
+          , E.fromList (L.replicate 90 (c2w 'h'))
+          ])
+        y <- Nonblock.readMany r 5 3
+        y @?= (5,E.fromList
+          [ E.fromList (L.replicate 30 (c2w 'g'))
+          , E.fromList (L.replicate 90 (c2w 'h'))
+          ])
     ]
   , testGroup "parallel"
     [ testCase "a" $ do
@@ -167,9 +208,12 @@ main = defaultMain $ testGroup "rotera"
                          -- queue. The goal here is to ensure that the writer
                          -- thread does not corrupt our reads by purging old
                          -- data while it is still being read.
-                         (ident', bytes) <- read r (-1)
+                         mr <- read r 0
                          C.signalQSemN sem n
-                         go2 (if ident' == (-1) then xs else bytes : xs)
+                         let ys = case mr of
+                               Nothing -> xs
+                               Just (_,bytes) -> bytes : xs
+                         go2 ys
                        True -> pure (S.singleton xs)
                  go2 []
             )

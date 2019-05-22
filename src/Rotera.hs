@@ -6,14 +6,14 @@
 module Rotera
   ( Rotera
   , Settings(..)
-  , push
   , pushMany
-  , read
+  , push
   , new
   , commit
   ) where
 
 import Prelude hiding (read)
+import Rotera.Unsafe (Discourse(..),Rotera(..))
 
 import Control.Concurrent.STM (STM,TVar)
 import Control.Monad (when)
@@ -33,8 +33,6 @@ import qualified System.IO.MMap as MM
 import qualified Data.Primitive.Addr as PM
 import qualified Data.Primitive as PM
 import qualified Data.Primitive.Ptr as PM
-import qualified Data.Primitive.MVar as PM
-import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy as LB
 import qualified Data.ByteString.Internal as BSI
 import qualified System.Directory as DIR
@@ -77,69 +75,6 @@ import qualified Data.Vector.Primitive.Mutable as PV
 -- the right. The must be the only thing that happens in the transaction.
 -- Otherwise, an untimely crash would corrupt the file.
 
-
--- | A persisted rotating queue that removes the oldest entries as new
---   entries come in.
-data Rotera = Rotera
-  !Addr
-  -- Address of the memory-mapped file used for persistence. This
-  -- is the address of the header page that preceeds the data section
-  -- of the file.
-  !Int
-  -- Maximum number of bytes used to preserve logs. By adding this
-  -- to the data section address, one can compute the address of the
-  -- resolution table.
-  !Int
-  -- Maximum number of events persisted. This determines the size of
-  -- the resolution table.
-  !Int
-  -- Dead zone size. This is number of events that exist as a buffer
-  -- between the oldest event and the newest event. The dead zone
-  -- helps prevent contention.
-  !(MutablePrimArray RealWorld Int)
-  -- A singleton array holding the staged next event id.
-  !(TVar Discourse)
-  -- This is the reader and writer lock. It contains an array of all event numbers
-  -- in use. The writer updates the minimal event number every time before it
-  -- attempts to acquire the lock. That means that the number
-  -- is incremented before the actual deletions
-  -- happen. So, it is possible that the lowest event number in
-  -- the array is lower than the oldest active id. That is fine since the writer
-  -- will keep reacquiring the lock until the old reader has dropped out.
-  -- The preemptive bump of the oldest active event number means that new
-  -- readers can join while the writer is waiting and they will not block
-  -- the writer. The writer thread uses the minimal element in this array
-  -- to decide whether or not it can safely delete old events. Both
-  -- the writer thread and the reader threads hold this lock for
-  -- very brief periods of time. However, they acquire it differently.
-  -- The readers acquires it both before reading events and after reading
-  -- events. The writer acquires it every time it tries to push. If it
-  -- detects that there is a reader of old events, it will repeatedly
-  -- attempt to reacquire it every time a reader drops out. Eventually,
-  -- the reader of old events must leave.
-  -- !(PM.MVar RealWorld ())
-  -- This is used to signal the writer thread that it should try again.
-  -- This only matters when a reader is reading very old events that
-  -- the writer is waiting to overwrite. To send a signal, this library
-  -- calls take immidiately followed by put. This means that sending a
-  -- signal can block. It blocks if another reader is simultaneously
-  -- sending a signal or if the writer is already checking to see if
-  -- it is safe to delete old events.
-  -- !(TVar Int)
-  -- The most recently committed value for next event id
-  -- !(TVar Int)
-  -- The oldest available id
-
--- TODO: split discource into two data types. One will have the
--- arrays and the other will have the metadata. The reason is
--- that the metadata should only ever get written to by the
--- writer thread. This will prevent unneeded wakeups.
-data Discourse = Discourse
-  !(PrimArray Int) -- event ids in use by reader threads, has same length as signals array
-  !(SmallArray (TVar Bool)) -- used to signal that readers should stop performing blocking io
-  !Int -- most recent committed id plus one, committed
-  !Int -- oldest available id, both staged and committed
-
 data Settings = Settings
   { settingsSize :: !Int
     -- ^ Maximum number of bytes used to preserve logs. This is expected
@@ -174,7 +109,6 @@ new (Settings maxEventBytes0 maximumEvents0 deadZoneEvents0 path) = do
       when (offset /= 0) (fail "Rotera.new: mmapped file had non-size offset")
       header <- PM.readOffAddr base 0
       when (header /= magicHeader) (fail "Rotera.new: magic header was invalid")
-      reattemptWrite <- PM.newEmptyMVar
       lowestEvent <- PM.readOffAddr base 1
       nextEvent <- PM.readOffAddr base 2
       staging <- PM.newPrimArray 1 :: IO (MutablePrimArray RealWorld Int)
@@ -265,8 +199,6 @@ replaceLowest !newLowestEvent !discourseVar = STM.atomically $ do
   Discourse inUse stopBlock nextEvent _ <- STM.readTVar discourseVar
   STM.writeTVar discourseVar $! Discourse inUse stopBlock nextEvent newLowestEvent
 
-data Status = Good | Retry | CommitRetry
-
 -- After this runs, all locks have been released by this thread. Additionally,
 -- we are guaranteed that no future reads will read anything below the given
 -- event id.
@@ -302,131 +234,6 @@ waitForReadsPhase2 !expectedLowestEvent !discourseVar = STM.atomically $ do
             else STM.retry
         else pure ()
   go (PM.sizeofPrimArray inUse - 1)
-
--- Inform the readers, using the read-write lock, that it is now
--- forbidden to read an event whose id is below expectedLowestEvent.
--- Then, wait until any reader that had been reading earlier events
--- is finished. Once all of them have finished, we can be confident
--- that no reader will ever read an event below this id again.
-waitForReadsLoop ::
-     Int -- minimum event id
-  -> PM.MVar RealWorld (PM.MutablePrimArray RealWorld Int) -- reader writer lock
-  -> PM.MVar RealWorld () -- writer signal
-  -> IO ()
-waitForReadsLoop expectedLowestEvent readWrite reattemptWrite = do
-  PM.takeMVar reattemptWrite
-  m <- PM.takeMVar readWrite
-  actualLowestEvent <- minimumLoop m maxBound 0 =<< PM.getSizeofMutablePrimArray m
-  PM.putMVar readWrite m
-  if actualLowestEvent >= expectedLowestEvent
-    then pure ()
-    else waitForReadsLoop expectedLowestEvent readWrite reattemptWrite
-
--- Find the smallest event id in the array.
-minimumLoop :: PM.MutablePrimArray RealWorld Int -> Int -> Int -> Int -> IO Int
-minimumLoop !m !acc !ix !sz = if ix < sz
-  then do
-    x <- PM.readPrimArray m ix
-    minimumLoop m (min acc x) (ix + 1) sz
-  else pure acc
-
--- If all of the read slots are taken, this creates a copy of the array
--- with one extra slot at the end. We use the max bound of Int to mean
--- that the slot is empty. The sz argument should be equal to the size
--- of the old event id array. The new event id array should have a size
--- one greater than this. It will often be resized by this function.
-assignEventIdLoop ::
-     MutablePrimArray s Int
-  -> SmallArray (TVar Bool)
-  -> PrimArray Int
-  -> TVar Bool -- Having this argument here is foolish, but it is convenient
-  -> Int -> Int -> Int
-  -> ST s (PrimArray Int,SmallArray (TVar Bool))
-assignEventIdLoop !new !stopBlock !old !extraStop !eventId !ix !sz = if ix < sz
-  then do
-    let oldEventId = PM.indexPrimArray old ix
-    if oldEventId == maxBound
-      then do
-        PM.writePrimArray new ix eventId
-        PM.copyPrimArray new (ix + 1) old (ix + 1) (sz - (ix + 1))
-        PM.shrinkMutablePrimArray new sz
-        new' <- PM.unsafeFreezePrimArray new
-        pure (new',stopBlock)
-      else do
-        PM.writePrimArray new ix oldEventId
-        assignEventIdLoop new stopBlock old extraStop eventId (ix + 1) sz
-  else do
-    PM.writePrimArray new sz eventId
-    new' <- PM.unsafeFreezePrimArray new
-    newStop <- PM.newSmallArray (sz + 1) extraStop
-    PM.copySmallArray newStop 0 stopBlock 0 sz
-    newStop' <- PM.unsafeFreezeSmallArray newStop
-    pure (new',newStop')
-
--- Remove an event id from the array. This is called when a reader
--- is shutting down.
-removeEventIdLoop :: MutablePrimArray s Int -> PrimArray Int -> Int -> Int -> Int -> ST s (Int,PrimArray Int)
-removeEventIdLoop !m !old !eventId !ix !sz = if ix < sz
-  then do
-    let oldEventId = PM.indexPrimArray old ix
-    if oldEventId == eventId
-      then do
-        PM.writePrimArray m ix maxBound
-        PM.copyPrimArray m (ix + 1) old (ix + 1) (sz - (ix + 1))
-        m' <- PM.unsafeFreezePrimArray m
-        pure (ix,m')
-      else removeEventIdLoop m old eventId (ix + 1) sz
-  else error "removeEventIdLoop did not find the identifier"
-
--- | Push any number of events into the queue. The callback will be
---   fed these arguments:
---
---   * An address into the data section of the queue
---   * Maximum number of usable bytes (used to prevent overflow
---     when the address is near the end of the queue)
---
---   The callback returns the number of events written into the queue.
--- push ::
---      Rotera -- ^ queue
---   -> Int -- ^ total expected number of bytes
---   -> PrimArray Int -- ^ sizes of the events
---   -> (Addr -> Int -> IO Int) -- ^ callback that should not perform blocking IO
---   -> IO ()
--- push 
-
--- | Push a single event onto the queue. Its persistence is not guaranteed
---   until 'commit' is called. This function is not thread-safe. It should
---   always be called from the same writer thread.
-push :: Rotera -> ByteString -> IO ()
-push r@(Rotera base maxEventBytes maximumEvents deadZoneEvents staging _) (BSI.PS fp poff len) = do
-  -- Silently discard events that could lead to a situation where the dead zone
-  -- is bigger than the whole queue. Maybe we should fail or return an indicator
-  -- of this failure instead.
-  if len < div maxEventBytes (deadZoneEvents + 2)
-    then do
-      (eventId, off) <- accomodate r 1 len
-      FP.withForeignPtr fp $ \(Ptr p) -> do
-        let src = PM.Addr p
-        debug ("push: copying " ++ show len ++ " bytes")
-        if off + len <= maxEventBytes
-          then PM.copyAddr (PM.plusAddr base (4096 + off)) (PM.plusAddr src poff) len
-          else do
-            let firstFragmentSize = maxEventBytes - off
-            PM.copyAddr (PM.plusAddr base (4096 + off)) (PM.plusAddr src poff) firstFragmentSize
-            PM.copyAddr (PM.plusAddr base 4096) (PM.plusAddr src (firstFragmentSize + poff)) (len - firstFragmentSize)
-      -- TODO: I commented this line out because we definitely should not be doing
-      -- two writes to the offset table. I need to think more carefully about what
-      -- happens on the very first push, but I think what we have now works.
-      -- PM.writeOffAddr (PM.plusAddr base (4096 + maxEventBytes)) (mod eventId maximumEvents) off
-      let nextOffsetPos = (mod (eventId + 1) maximumEvents)
-          nextOffset = (mod (off + len) maxEventBytes) :: Int
-      debug $ "push: next offset position is " ++ show nextOffsetPos ++ " and value is " ++ show nextOffset
-      PM.writeOffAddr
-        (PM.plusAddr base (4096 + maxEventBytes))
-        nextOffsetPos
-        nextOffset
-      PM.writePrimArray staging 0 (eventId + 1)
-    else fail "push: too big"
 
 -- Invariant: the length of payloads is equal to the sum of the elements
 -- in sizes.
@@ -496,111 +303,46 @@ commit (Rotera base maxEventBytes maximumEvents _ staging discourseVar) = do
     Discourse inUse stopBlock _ lowestEvent <- STM.readTVar discourseVar
     STM.writeTVar discourseVar $! Discourse inUse stopBlock newNextEvent lowestEvent
     
+-- | Push a single event onto the queue. Its persistence is not guaranteed
+--   until 'commit' is called. This function is not thread-safe. It should
+--   always be called from the same writer thread.
+push :: Rotera -> ByteString -> IO ()
+push r@(Rotera base maxEventBytes maximumEvents deadZoneEvents staging _) (BSI.PS fp poff len) = do
+  -- Silently discard events that could lead to a situation where the dead zone
+  -- is bigger than the whole queue. Maybe we should fail or return an indicator
+  -- of this failure instead.
+  if len < div maxEventBytes (deadZoneEvents + 2)
+    then do
+      (eventId, off) <- accomodate r 1 len
+      FP.withForeignPtr fp $ \(Ptr p) -> do
+        let src = PM.Addr p
+        debug ("push: copying " ++ show len ++ " bytes")
+        if off + len <= maxEventBytes
+          then PM.copyAddr (PM.plusAddr base (4096 + off)) (PM.plusAddr src poff) len
+          else do
+            let firstFragmentSize = maxEventBytes - off
+            PM.copyAddr (PM.plusAddr base (4096 + off)) (PM.plusAddr src poff) firstFragmentSize
+            PM.copyAddr (PM.plusAddr base 4096) (PM.plusAddr src (firstFragmentSize + poff)) (len - firstFragmentSize)
+      -- TODO: I commented this line out because we definitely should not be doing
+      -- two writes to the offset table. I need to think more carefully about what
+      -- happens on the very first push, but I think what we have now works.
+      -- PM.writeOffAddr (PM.plusAddr base (4096 + maxEventBytes)) (mod eventId maximumEvents) off
+      let nextOffsetPos = (mod (eventId + 1) maximumEvents)
+          nextOffset = (mod (off + len) maxEventBytes) :: Int
+      debug $ "push: next offset position is " ++ show nextOffsetPos ++ " and value is " ++ show nextOffset
+      PM.writeOffAddr
+        (PM.plusAddr base (4096 + maxEventBytes))
+        nextOffsetPos
+        nextOffset
+      PM.writePrimArray staging 0 (eventId + 1)
+    else fail "push: too big"
+
 roteraResolutionTable :: Rotera -> Ptr Int
 roteraResolutionTable (Rotera base eventSectionSize _ _ _ _) =
   let !(PM.Addr a) = PM.plusAddr base (4096 + eventSectionSize) in Ptr a
 
--- | Read a event from the queue. If the event identifier refers to an
---   event that has already been purged, the oldest persisted event is returned
---   along with its identifier. If the event identifier refers to an event
---   that has not yet happened, the newest persisted event is returned along
---   with its identifier. This function is thread-safe.
---
---   This only reads committed events.
-read ::
-     Rotera -- ^ rotating queue
-  -> Int -- ^ event identifier
-  -> IO (Int,ByteString)
-read (Rotera base maxEventBytes maximumEvents _ _ discourseVar) !requestedEventId = do
-  nextEvent' :: Int <- PM.readOffAddr base 2
-  debug $ "read: maximum events is " ++ show maximumEvents
-  debug $ "read: nextEvent' is " ++ show nextEvent'
-  if nextEvent' /= 0
-    then do
-      -- TODO: stop allocating this tvar here
-      extraStop <- STM.newTVarIO False
-      actualEventId <- STM.atomically $ do
-        Discourse inUse stopBlock nextEvent lowestEvent <- STM.readTVar discourseVar
-        let actualEventId = min (nextEvent - 1) (max requestedEventId lowestEvent)
-            (newInUse,newStopBlock) = runST $ do
-              let inUseSz = PM.sizeofPrimArray inUse
-              buf <- PM.newPrimArray (inUseSz + 1)
-              assignEventIdLoop buf stopBlock inUse extraStop actualEventId 0 inUseSz
-        STM.writeTVar discourseVar $! Discourse newInUse newStopBlock nextEvent lowestEvent
-        pure actualEventId
-      debug $ "read: actualEventId is " ++ show actualEventId
-      let modEventId = (mod actualEventId maximumEvents)
-      off <- PM.readOffAddr
-        (PM.plusAddr base (4096 + maxEventBytes))
-        modEventId
-      let modEventIdSucc = (mod (actualEventId + 1) maximumEvents)
-      offNext <- PM.readOffAddr
-        (PM.plusAddr base (4096 + maxEventBytes))
-        modEventIdSucc
-      debug $ "read: off[" ++ show modEventId ++ "] = " ++ show off
-           ++ " and off[" ++ show modEventIdSucc ++ "] = " ++ show offNext
-      (dst,len) <- if offNext >= off
-        then do
-          let len = offNext - off
-          dst <- PM.newPinnedByteArray len
-          PM.copyAddrToByteArray dst 0 (PM.plusAddr base (4096 + off)) len
-          pure (dst,len)
-        else do
-          let len = maxEventBytes + (offNext - off)
-          dst <- PM.newPinnedByteArray len
-          PM.copyAddrToByteArray dst 0 (PM.plusAddr base (4096 + off)) (maxEventBytes - off)
-          PM.copyAddrToByteArray dst (maxEventBytes - off) (PM.plusAddr base 4096) offNext
-          pure (dst,len)
-      STM.atomically $ do
-        Discourse inUse stopBlock nextEvent lowestEvent <- STM.readTVar discourseVar
-        let (ix,newInUse) = runST $ do
-              let sz = PM.sizeofPrimArray inUse
-              newInUse' <- PM.newPrimArray sz
-              removeEventIdLoop newInUse' inUse actualEventId 0 sz
-        STM.writeTVar (PM.indexSmallArray stopBlock ix) False
-        STM.writeTVar discourseVar $! Discourse newInUse stopBlock nextEvent lowestEvent
-      pure (actualEventId,BSI.PS (FP.ForeignPtr (unPtr (PM.mutableByteArrayContents dst)) (FP.PlainPtr (unMutableByteArray dst))) 0 len)
-    else pure ((-1),B.empty)
-
-unMutableByteArray :: MutableByteArray s -> MutableByteArray# s
-unMutableByteArray (PM.MutableByteArray x) = x
-
 unPtr :: Ptr a -> Addr#
 unPtr (Ptr x) = x
-
--- A node in a circular doubly-linked list. The payload consists of
--- two fields:
---
--- * The oldest event ID the reader is keeping alive.
--- * A TVar that the writer thread can use to tell the
---   reader to stop performing blocking IO by setting
---   it to true.
---
--- There is not really a root in a doubly linked list. We
--- just need to keep track of a pointer to any of the nodes,
--- and that will let us traverse the list.
-data Node = Node !(TVar Node) !(TVar Node) !(TVar Int) !(TVar Bool)
-
-eqNode :: Node -> Node -> Bool
-eqNode (Node x _ _ _) (Node y _ _ _) = x == y
-
--- Remove a node from the linked list. This arbitrarily sets the
--- root to an adjacent node. Or, if the adjacent nodes were the
--- node itself, this sets the root to Nothing.
-remove ::
-     TVar (Maybe Node) -- root node 
-  -> Node
-  -> STM ()
-remove !root !node@(Node left right _ _) = do
-  leftNode@(Node _ leftRight _ _) <- STM.readTVar left
-  if eqNode leftNode node
-    then STM.writeTVar root Nothing
-    else do
-      rightNode@(Node rightLeft _ _ _) <- STM.readTVar right
-      STM.writeTVar leftRight rightNode
-      STM.writeTVar rightLeft leftNode
-      let !newRoot = Just leftNode
-      STM.writeTVar root newRoot
 
 -- insert ::
 --      TVar (Maybe Node) -- root node

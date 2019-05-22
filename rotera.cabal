@@ -20,8 +20,10 @@ category: Database
 extra-source-files:  CHANGELOG.md
 
 library
-  exposed-modules: Rotera
-  -- other-modules:
+  exposed-modules:
+    Rotera
+    Rotera.Unsafe
+    Rotera.Nonblocking
   -- other-extensions:
   build-depends:
     , base >= 4.11.1.0
@@ -31,6 +33,7 @@ library
     , mmap >= 0.5.9
     , primitive >= 0.7
     , primitive-addr >= 0.1
+    , primitive-unlifted >= 0.1
     , vector >= 0.12.0.3
     , stm >= 2.5
   hs-source-dirs: src
