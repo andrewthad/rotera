@@ -4,18 +4,22 @@
 {-# language LambdaCase #-}
 
 import Prelude hiding (read)
-import Rotera (Settings(..),new,push,read)
+import Rotera (Settings(..),new,push,pushMany,read,commit)
+
+import Control.Concurrent (forkIO)
+import Control.Exception (SomeException,try)
+import Control.Monad (forM_)
+import Data.ByteString (ByteString)
+import Data.Bytes.Types (Bytes(..),MutableBytes(..))
+import Data.Char (ord)
+import Data.Foldable (foldlM)
+import Data.Primitive (MutableByteArray)
+import Data.Word (Word32)
+import Data.Word (Word8)
+import GHC.Exts (RealWorld)
+import System.Random (randomRIO)
 import Test.Tasty (defaultMain,testGroup)
 import Test.Tasty.HUnit (testCase,assertBool,(@?=))
-import Data.Word (Word8)
-import Data.Char (ord)
-import Control.Monad (forM_)
-import Control.Exception (SomeException,try)
-import GHC.Exts (RealWorld)
-import Data.Foldable (foldlM)
-import Control.Concurrent (forkIO)
-import System.Random (randomRIO)
-import Data.ByteString (ByteString)
 
 import qualified Data.IORef as IO
 import qualified Data.ByteString.Char8 as BC
@@ -24,6 +28,8 @@ import qualified Control.Concurrent as C
 import qualified Data.ByteString as B
 import qualified System.Directory as DIR
 import qualified Data.Primitive.MVar as PM
+import qualified Data.Vector.Primitive as PV
+import qualified Data.Primitive as PM
 
 main :: IO ()
 main = defaultMain $ testGroup "rotera"
@@ -32,6 +38,7 @@ main = defaultMain $ testGroup "rotera"
         DIR.removePathForcibly "example.bin"
         r <- new settings
         push r "hello world"
+        commit r
         x <- read r 0
         x @?= (0,"hello world")
     , testCase "b" $ do
@@ -39,6 +46,7 @@ main = defaultMain $ testGroup "rotera"
         r <- new settings
         push r "hello"
         push r "world"
+        commit r
         x <- read r 0
         y <- read r 1
         x @?= (0,"hello")
@@ -50,6 +58,7 @@ main = defaultMain $ testGroup "rotera"
         push r (B.replicate 1000 (c2w 'b'))
         push r (B.replicate 1000 (c2w 'c'))
         push r (B.replicate 1000 (c2w 'd'))
+        commit r
         w <- read r 0
         x <- read r 1
         y <- read r 2
@@ -61,17 +70,18 @@ main = defaultMain $ testGroup "rotera"
     , testCase "d" $ do
         DIR.removePathForcibly "example.bin"
         r <- new settings
-        push r (B.replicate 1000 (c2w 'a'))
-        push r (B.replicate 1000 (c2w 'b'))
-        push r (B.replicate 1000 (c2w 'c'))
-        push r (B.replicate 1000 (c2w 'd'))
-        push r (B.replicate 1000 (c2w 'e'))
+        push r ("u" <> B.replicate 1000 (c2w 'a') <> "u")
+        push r ("v" <> B.replicate 1000 (c2w 'b') <> "v")
+        push r (B.tail $ B.init $ "w" <> B.replicate 1000 (c2w 'c') <> "w")
+        push r (B.tail $ B.init $ "x" <> B.replicate 1000 (c2w 'd') <> "x")
+        push r (B.take 1002 $ B.drop 2 $ "yyy" <> B.replicate 1000 (c2w 'e') <> "yyy")
+        commit r
         w <- read r 0
         x <- read r 4
         y <- read r 5
         w @?= (3,B.replicate 1000 (c2w 'd'))
-        x @?= (4,B.replicate 1000 (c2w 'e'))
-        y @?= (4,B.replicate 1000 (c2w 'e'))
+        x @?= (4,"y" <> B.replicate 1000 (c2w 'e') <> "y")
+        y @?= (4,"y" <> B.replicate 1000 (c2w 'e') <> "y")
     , testCase "e" $ do
         let start = 470 :: Int
         DIR.removePathForcibly "example.bin"
@@ -79,8 +89,49 @@ main = defaultMain $ testGroup "rotera"
         forM_ (enumFromTo start (512 :: Int)) $ \i -> do
           let bytes = B.replicate i (fromIntegral i)
           push r bytes
+          commit r
           w <- read r (i - start)
           w @?= (i - start,bytes)
+    , testCase "f" $ do
+        DIR.removePathForcibly "example.bin"
+        r <- new settings
+        push r (B.take 9 (B.drop 1 "abcdefghijk"))
+        push r "world"
+        commit r
+        x <- read r 0
+        y <- read r 1
+        x @?= (0,"bcdefghij")
+        y @?= (1,"world")
+    , testCase "g" $ do
+        DIR.removePathForcibly "example.bin"
+        r <- new settings { settingsExpiredEntries = 5 }
+        let x0 = bytesFromVector $ PV.singleton (c2w 'j')
+            x1 = bytesFromVector $ PV.replicate 50 (c2w 'x')
+            x2 = bytesFromVector $ PV.replicate 90 (c2w 'y')
+            x3 = bytesFromVector $ PV.replicate 30 (c2w 'z')
+            x4 = bytesFromVector $ PV.singleton (c2w 'k')
+        payloadsUnsliced <- thawBytes (x0 <> x1 <> x2 <> x3 <> x4)
+        let payloads = MutableBytes payloadsUnsliced 1 (50 + 90 + 30)
+        lens <- PV.thaw (PV.fromList [50,90,30 :: Word32])
+        push r (B.replicate 500 (c2w 'a'))
+        push r (B.replicate 500 (c2w 'b'))
+        push r (B.replicate 500 (c2w 'c'))
+        push r (B.replicate 500 (c2w 'd'))
+        push r (B.replicate 500 (c2w 'a'))
+        push r (B.replicate 500 (c2w 'b'))
+        push r (B.replicate 500 (c2w 'c'))
+        push r (B.replicate 500 (c2w 'd'))
+        pushMany r lens payloads
+        push r (B.replicate 40 (c2w 'e'))
+        commit r
+        x <- read r 8
+        x @?= (8,B.replicate 50 (c2w 'x'))
+        y <- read r 9
+        y @?= (9,B.replicate 90 (c2w 'y'))
+        z <- read r 10
+        z @?= (10,B.replicate 30 (c2w 'z'))
+        k <- read r 11
+        k @?= (11,B.replicate 40 (c2w 'e'))
     ]
   , testGroup "parallel"
     [ testCase "a" $ do
@@ -95,6 +146,7 @@ main = defaultMain $ testGroup "rotera"
                     n <- randomRIO (1,threads)
                     C.waitQSemN sem n
                     push r (BC.replicate 800 c)
+                    commit r
                     C.signalQSemN sem n
                     go1 (succ c)
                   else IO.writeIORef doneWriting True
@@ -196,4 +248,13 @@ foldCommuteIO f xs = do
   case x of
     Left e -> error $ "Exception encountered in foldCommuteIO thread. Terminating: " <> show e
     Right m -> pure m
+
+bytesFromVector :: PV.Vector Word8 -> Bytes
+bytesFromVector (PV.Vector off len arr) = Bytes arr off len
+
+thawBytes :: Bytes -> IO (MutableByteArray RealWorld)
+thawBytes (Bytes arr off len) = do
+  marr <- PM.newByteArray len
+  PM.copyByteArray marr 0 arr off len
+  pure marr
 
