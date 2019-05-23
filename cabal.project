@@ -1,4 +1,4 @@
-packages: .
+packages: . ../primitive-unlifted
 source-repository-package
   type: git
   location: https://github.com/andrewthad/mmap
@@ -6,4 +6,8 @@ source-repository-package
 source-repository-package
   type: git
   location: https://github.com/andrewthad/byteslice
-  tag: 79952882dcce9cb7eb9acc83b50fa86ed71dcb9b
+  tag: 71d1d41e99b75802623d8c50966410d5e227e1f4
+source-repository-package
+  type: git
+  location: https://github.com/andrewthad/primitive-unlifted
+  tag: 7394cfc02765bebdf7835355d0ef3bd4f1bb2792
