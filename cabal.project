@@ -1,4 +1,4 @@
-packages: . ../primitive-unlifted
+packages: .
 source-repository-package
   type: git
   location: https://github.com/andrewthad/mmap
