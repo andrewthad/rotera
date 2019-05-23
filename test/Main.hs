@@ -39,14 +39,14 @@ main = defaultMain $ testGroup "rotera"
   [ testGroup "sequential"
     [ testCase "a" $ do
         DIR.removePathForcibly "example.bin"
-        r <- new settings
+        r <- new settings "example.bin"
         push r "hello world"
         commit r
         x <- Nonblock.read r 0
         x @?= Just (0,"hello world")
     , testCase "b" $ do
         DIR.removePathForcibly "example.bin"
-        r <- new settings
+        r <- new settings "example.bin"
         push r "hello"
         push r "world"
         commit r
@@ -56,7 +56,7 @@ main = defaultMain $ testGroup "rotera"
         y @?= Just (1,"world")
     , testCase "c" $ do
         DIR.removePathForcibly "example.bin"
-        r <- new settings
+        r <- new settings "example.bin"
         push r (B.replicate 1000 (c2w 'a'))
         push r (B.replicate 1000 (c2w 'b'))
         push r (B.replicate 1000 (c2w 'c'))
@@ -72,7 +72,7 @@ main = defaultMain $ testGroup "rotera"
         z @?= Just (3,B.replicate 1000 (c2w 'd'))
     , testCase "d" $ do
         DIR.removePathForcibly "example.bin"
-        r <- new settings
+        r <- new settings "example.bin"
         push r ("u" <> B.replicate 1000 (c2w 'a') <> "u")
         push r ("v" <> B.replicate 1000 (c2w 'b') <> "v")
         push r (B.tail $ B.init $ "w" <> B.replicate 1000 (c2w 'c') <> "w")
@@ -88,7 +88,7 @@ main = defaultMain $ testGroup "rotera"
     , testCase "e" $ do
         let start = 470 :: Int
         DIR.removePathForcibly "example.bin"
-        r <- new settings
+        r <- new settings "example.bin"
         forM_ (enumFromTo start (512 :: Int)) $ \i -> do
           let bytes = B.replicate i (fromIntegral i)
           push r bytes
@@ -97,7 +97,7 @@ main = defaultMain $ testGroup "rotera"
           w @?= Just (i - start,bytes)
     , testCase "f" $ do
         DIR.removePathForcibly "example.bin"
-        r <- new settings
+        r <- new settings "example.bin"
         push r (B.take 9 (B.drop 1 "abcdefghijk"))
         push r "world"
         commit r
@@ -107,7 +107,7 @@ main = defaultMain $ testGroup "rotera"
         y @?= Just (1,"world")
     , testCase "g" $ do
         DIR.removePathForcibly "example.bin"
-        r <- new settings { settingsExpiredEntries = 5 }
+        r <- new settings { settingsExpiredEntries = 5 } "example.bin"
         let x0 = bytesFromVector $ PV.singleton (c2w 'j')
             x1 = bytesFromVector $ PV.replicate 50 (c2w 'x')
             x2 = bytesFromVector $ PV.replicate 90 (c2w 'y')
@@ -137,7 +137,7 @@ main = defaultMain $ testGroup "rotera"
         k @?= Just (11,B.replicate 40 (c2w 'e'))
     , testCase "h" $ do
         DIR.removePathForcibly "example.bin"
-        r <- new settings
+        r <- new settings "example.bin"
         push r (B.replicate 900 (c2w 'a'))
         push r (B.replicate 900 (c2w 'b'))
         push r (B.replicate 900 (c2w 'c'))
@@ -153,7 +153,7 @@ main = defaultMain $ testGroup "rotera"
           ])
     , testCase "i" $ do
         DIR.removePathForcibly "example.bin"
-        r <- new settings
+        r <- new settings "example.bin"
         push r (B.replicate 1000 (c2w 'a'))
         push r (B.replicate 1000 (c2w 'b'))
         push r (B.replicate 1000 (c2w 'c'))
@@ -178,7 +178,7 @@ main = defaultMain $ testGroup "rotera"
     [ testCase "a" $ do
         let threads = 40
         DIR.removePathForcibly "example.bin"
-        r <- new settings
+        r <- new settings "example.bin"
         sem <- C.newQSemN 0
         doneWriting <- IO.newIORef False
         results <- foldCommuteIO id
@@ -239,7 +239,7 @@ main = defaultMain $ testGroup "rotera"
   ]
 
 settings :: Settings
-settings = Settings 4096 1024 2 "example.bin"
+settings = Settings 4096 1024 2
 
 c2w :: Char -> Word8
 c2w = fromIntegral . ord

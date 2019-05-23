@@ -9,6 +9,7 @@ module Rotera
   , pushMany
   , push
   , new
+  , open
   , commit
   ) where
 
@@ -86,12 +87,32 @@ data Settings = Settings
   , settingsExpiredEntries :: !Int
     -- ^ Number of expired entries to keep as a buffer between
     --   the newest entry and old entries.
-  , settingsPath :: FilePath
-    -- ^ Path to the file where logs are preserved.
   }
 
-new :: Settings -> IO Rotera
-new (Settings maxEventBytes0 maximumEvents0 deadZoneEvents0 path) = do
+open :: String -> IO Rotera
+open path = do
+  (Ptr a, rawsize, offset, size) <- MM.mmapFilePtr path MM.ReadWrite Nothing
+  let base = PM.Addr a
+  header <- PM.readOffAddr base 0
+  when (header /= magicHeader) (fail "Rotera.open: magic header was invalid")
+  lowestEvent <- PM.readOffAddr base 1
+  nextEvent <- PM.readOffAddr base 2
+  maxEventBytes <- PM.readOffAddr base 3
+  maximumEvents <- PM.readOffAddr base 4
+  deadZoneEvents <- PM.readOffAddr base 5
+  let expectedSize = fromIntegral (4096 + maxEventBytes + (maximumEvents * PM.sizeOf (undefined :: Word)))
+  when (rawsize /= expectedSize) (fail ("Rotera.open: mmapped file had rawsize " ++ show rawsize ++ " instead of expected size " ++ show expectedSize))
+  when (size /= expectedSize) (fail ("Rotera.open: mmapped file had size " ++ show size ++ " instead of expected size " ++ show expectedSize))
+  when (offset /= 0) (fail "Rotera.open: mmapped file had non-size offset")
+  staging <- PM.newPrimArray 1 :: IO (MutablePrimArray RealWorld Int)
+  PM.writePrimArray staging 0 nextEvent
+  discourseVar <- STM.newTVarIO $! Discourse mempty mempty nextEvent lowestEvent
+  debug ("open: maximum events = " ++ show maximumEvents)
+  pure (Rotera base maxEventBytes maximumEvents deadZoneEvents staging discourseVar)
+  
+
+new :: Settings -> FilePath -> IO Rotera
+new (Settings maxEventBytes0 maximumEvents0 deadZoneEvents0) path = do
   let maxEventBytes = max 4096 (div maxEventBytes0 4096 * 4096)
       maximumEvents = max 1024 (div maximumEvents0 1024 * 1024)
       deadZoneEvents = min (max 2 deadZoneEvents0) (div maximumEvents 2)
@@ -111,6 +132,9 @@ new (Settings maxEventBytes0 maximumEvents0 deadZoneEvents0 path) = do
       when (header /= magicHeader) (fail "Rotera.new: magic header was invalid")
       lowestEvent <- PM.readOffAddr base 1
       nextEvent <- PM.readOffAddr base 2
+      PM.writeOffAddr base 3 maxEventBytes 
+      PM.writeOffAddr base 4 maximumEvents 
+      PM.writeOffAddr base 5 deadZoneEvents 
       staging <- PM.newPrimArray 1 :: IO (MutablePrimArray RealWorld Int)
       PM.writePrimArray staging 0 nextEvent
       discourseVar <- STM.newTVarIO $! Discourse mempty mempty nextEvent lowestEvent

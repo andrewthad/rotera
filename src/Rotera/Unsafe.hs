@@ -146,11 +146,16 @@ nonblockingLockEvent !discourseVar !requestedEventId !reqEvts = do
   extraStop <- STM.newTVarIO False
   STM.atomically $ do
     Discourse inUse stopBlock nextEvent lowestEvent <- STM.readTVar discourseVar
-    let actualEvts = min reqEvts (nextEvent - requestedEventId)
+    let (actualEvts,actualEventId) = if requestedEventId == (-1)
+          then
+            let y = min reqEvts (nextEvent - lowestEvent)
+             in (y,nextEvent - y)
+          else
+            let x = max requestedEventId lowestEvent
+             in (min reqEvts (nextEvent - x),x)
     if actualEvts > 0
       then do
-        let actualEventId = max requestedEventId lowestEvent
-            (newInUse,newStopBlock,signal) = runST $ do
+        let (newInUse,newStopBlock,signal) = runST $ do
               let inUseSz = PM.sizeofPrimArray inUse
               buf <- PM.newPrimArray (inUseSz + 1)
               assignEvent buf stopBlock inUse extraStop actualEventId
