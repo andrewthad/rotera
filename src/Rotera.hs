@@ -2,6 +2,7 @@
 {-# language LambdaCase #-}
 {-# language MagicHash #-}
 {-# language ScopedTypeVariables #-}
+{-# language NamedFieldPuns #-}
 
 module Rotera
   ( Rotera
@@ -14,7 +15,8 @@ module Rotera
   ) where
 
 import Prelude hiding (read)
-import Rotera.Unsafe (Discourse(..),Rotera(..))
+import Rotera.Unsafe (Discourse(..),Rotera(..),ReadTicket(..),EventRange(..))
+import Rotera.Unsafe (WriterLock(..))
 
 import Control.Concurrent.STM (STM,TVar)
 import Control.Monad (when)
@@ -31,6 +33,7 @@ import qualified Control.Concurrent.STM as STM
 import qualified Foreign.ForeignPtr as FP
 import qualified GHC.ForeignPtr as FP
 import qualified System.IO.MMap as MM
+import qualified Data.Primitive.PrimArray.Atomic as PM
 import qualified Data.Primitive.Addr as PM
 import qualified Data.Primitive as PM
 import qualified Data.Primitive.Ptr as PM
@@ -104,12 +107,17 @@ open path = do
   when (rawsize /= expectedSize) (fail ("Rotera.open: mmapped file had rawsize " ++ show rawsize ++ " instead of expected size " ++ show expectedSize))
   when (size /= expectedSize) (fail ("Rotera.open: mmapped file had size " ++ show size ++ " instead of expected size " ++ show expectedSize))
   when (offset /= 0) (fail "Rotera.open: mmapped file had non-size offset")
-  staging <- PM.newPrimArray 1 :: IO (MutablePrimArray RealWorld Int)
-  PM.writePrimArray staging 0 nextEvent
-  discourseVar <- STM.newTVarIO $! Discourse mempty mempty nextEvent lowestEvent
+  stagingBuf <- PM.newPrimArray 1 :: IO (MutablePrimArray RealWorld Int)
+  PM.writePrimArray stagingBuf 0 nextEvent
+  activeReadersVar <- STM.newTVarIO (mempty :: SmallArray ReadTicket)
+  eventRangeVar <- STM.newTVarIO $! EventRange lowestEvent nextEvent
+  writerVar <- STM.newTVarIO WriterLockUnlocked
   debug ("open: maximum events = " ++ show maximumEvents)
-  pure (Rotera base maxEventBytes maximumEvents deadZoneEvents staging discourseVar)
-  
+  pure $ Rotera
+    { base,maxEventBytes,maximumEvents,deadZoneEvents
+    , stagingBuf,activeReadersVar,eventRangeVar
+    , writerVar
+    }
 
 new :: Settings -> FilePath -> IO Rotera
 new (Settings maxEventBytes0 maximumEvents0 deadZoneEvents0) path = do
@@ -135,11 +143,17 @@ new (Settings maxEventBytes0 maximumEvents0 deadZoneEvents0) path = do
       PM.writeOffAddr base 3 maxEventBytes 
       PM.writeOffAddr base 4 maximumEvents 
       PM.writeOffAddr base 5 deadZoneEvents 
-      staging <- PM.newPrimArray 1 :: IO (MutablePrimArray RealWorld Int)
-      PM.writePrimArray staging 0 nextEvent
-      discourseVar <- STM.newTVarIO $! Discourse mempty mempty nextEvent lowestEvent
+      stagingBuf <- PM.newPrimArray 1 :: IO (MutablePrimArray RealWorld Int)
+      PM.writePrimArray stagingBuf 0 nextEvent
+      eventRangeVar <- STM.newTVarIO $! EventRange lowestEvent nextEvent
+      activeReadersVar <- STM.newTVarIO (mempty :: SmallArray ReadTicket)
+      writerVar <- STM.newTVarIO WriterLockUnlocked
       debug ("new: maximum events = " ++ show maximumEvents)
-      pure (Rotera base maxEventBytes maximumEvents deadZoneEvents staging discourseVar)
+      pure $ Rotera
+        { base,maxEventBytes,maximumEvents,deadZoneEvents
+        , stagingBuf,activeReadersVar,eventRangeVar
+        , writerVar
+        }
     else fail ("Rotera.new: expected size " ++ show expected ++ " but got size " ++ show actual)
 
 magicByteString :: ByteString
@@ -163,15 +177,18 @@ debug _ = pure ()
 
 -- Ensure that the dead zone is large enough to handle what is going
 -- to be written.
+--
+-- Precondition: The caller of this function must hold the writer lock
+-- It is never relinquished while this function is running.
 accomodate ::
      Rotera
   -> Int -- number of events
   -> Int -- total size of events 
   -> IO (Int,Int) -- next available event id and the next event data offset
-accomodate !r@(Rotera base maxEventBytes maximumEvents deadZoneEvents staging discourseVar) events bytes = do
+accomodate !r@Rotera{base,maxEventBytes,maximumEvents,deadZoneEvents,stagingBuf,activeReadersVar,eventRangeVar} events bytes = do
   debug "beginning accomodation"
-  nextEvent <- PM.readPrimArray staging 0
-  Discourse _ _ _ lowestEvent <- STM.readTVarIO discourseVar
+  nextEvent <- PM.readPrimArray stagingBuf 0
+  EventRange lowestEvent _ <- STM.readTVarIO eventRangeVar
   let table = roteraResolutionTable r
   lowestEventOffset <- PM.readOffPtr table (mod lowestEvent maximumEvents)
   nextEventOffset <- PM.readOffPtr table (mod nextEvent maximumEvents)
@@ -196,13 +213,17 @@ accomodate !r@(Rotera base maxEventBytes maximumEvents deadZoneEvents staging di
           maxEventBytes maximumEvents nextEventOffset
         debug ("decided new lowest event [new lowest event=" ++ show newLowestEvent ++ "]")
         PM.writeOffAddr base 1 newLowestEvent
-        replaceLowest newLowestEvent discourseVar
-        good <- waitForReadsPhase1 newLowestEvent discourseVar
-        when (not good) (waitForReadsPhase2 newLowestEvent discourseVar)
+        -- We replace the lowest allowed event identifier before
+        -- signal any readers of old things to hurry up. This means
+        -- that any new readers that show up after the signals are
+        -- sent cannot be reading events earlier than newLowestEvent.
+        replaceLowest newLowestEvent eventRangeVar
+        good <- waitForReadsPhase1 newLowestEvent activeReadersVar
+        when (not good) (waitForReadsPhase2 newLowestEvent activeReadersVar)
         -- TODO: calling commit here is not great. We probably want to
         -- split up commit into two functions or factor common parts of
         -- it out.
-        commit r
+        internalCommit r
         pure (nextEvent,nextEventOffset)
 
 -- Returns the event id that needs to become the new minimum.
@@ -217,47 +238,46 @@ accomodateLoop resolution eventId bytes maxEventBytes maximumEvents off0 = do
 
 replaceLowest ::
      Int -- minimum event id
-  -> TVar Discourse
+  -> TVar EventRange
   -> IO ()
-replaceLowest !newLowestEvent !discourseVar = STM.atomically $ do
-  Discourse inUse stopBlock nextEvent _ <- STM.readTVar discourseVar
-  STM.writeTVar discourseVar $! Discourse inUse stopBlock nextEvent newLowestEvent
+replaceLowest !newLowestEvent !var = STM.atomically $ do
+  EventRange _ nextEvent <- STM.readTVar var
+  STM.writeTVar var $! EventRange newLowestEvent nextEvent
 
 -- After this runs, all locks have been released by this thread. Additionally,
 -- we are guaranteed that no future reads will read anything below the given
 -- event id.
 waitForReadsPhase1 ::
      Int -- minimum event id
-  -> TVar Discourse
+  -> TVar (SmallArray ReadTicket)
   -> IO Bool
-waitForReadsPhase1 !expectedLowestEvent !discourseVar = STM.atomically $ do
-  Discourse inUse stopBlock _ _ <- STM.readTVar discourseVar
+waitForReadsPhase1 !expectedLowestEvent !var = STM.atomically $ do
+  tickets <- STM.readTVar var
   let go !ix good = if ix >= 0
         then do
-          let stopBlockVar = PM.indexSmallArray stopBlock ix
-          let actualLowestEvent = PM.indexPrimArray inUse ix
+          let (ReadTicket actualLowestEvent stopBlockVar) = PM.indexSmallArray tickets ix
           if actualLowestEvent >= expectedLowestEvent
             then go (ix - 1) good
             else do
               STM.writeTVar stopBlockVar True
               go (ix - 1) False
         else pure good
-  go (PM.sizeofSmallArray stopBlock - 1) True
+  go (PM.sizeofSmallArray tickets - 1) True
 
 waitForReadsPhase2 ::
      Int -- minimum event id
-  -> TVar Discourse
+  -> TVar (SmallArray ReadTicket)
   -> IO ()
-waitForReadsPhase2 !expectedLowestEvent !discourseVar = STM.atomically $ do
-  Discourse inUse _ _ _ <- STM.readTVar discourseVar
+waitForReadsPhase2 !expectedLowestEvent !var = STM.atomically $ do
+  tickets <- STM.readTVar var
   let go !ix = if ix >= 0
         then do
-          let actualLowestEvent = PM.indexPrimArray inUse ix
+          let ReadTicket actualLowestEvent _ = PM.indexSmallArray tickets ix
           if actualLowestEvent >= expectedLowestEvent
             then go (ix - 1)
             else STM.retry
         else pure ()
-  go (PM.sizeofPrimArray inUse - 1)
+  go (PM.sizeofSmallArray tickets - 1)
 
 -- Invariant: the length of payloads is equal to the sum of the elements
 -- in sizes.
@@ -266,7 +286,7 @@ pushMany ::
   -> PV.MVector RealWorld Word32 -- ^ sizes (length is total number of events)
   -> MutableBytes RealWorld -- ^ all data bytes smashed together
   -> IO ()
-pushMany r@(Rotera base maxEventBytes maximumEvents deadZoneEvents staging _) lens payloads = do
+pushMany r@Rotera{base,maxEventBytes,maximumEvents,deadZoneEvents,stagingBuf,writerVar} lens payloads = do
   let events = PV.length lens
   -- Perform sanity check
   vecMapM_
@@ -276,6 +296,10 @@ pushMany r@(Rotera base maxEventBytes maximumEvents deadZoneEvents staging _) le
     ) lens
   when (events >= deadZoneEvents - 1) $ do
     fail $ "pushMany: too many events, max is " ++ show (deadZoneEvents - 1)
+  myLock <- STM.newTVarIO False
+  -- Discard the signal since there is not anything we can do
+  -- to hurry up.
+  _ <- acquireWriter myLock writerVar
   (eventId0, off0) <- accomodate r events plen
   if off0 + plen <= maxEventBytes
     then PM.copyMutableByteArrayToAddr (addrToPtr (PM.plusAddr base (4096 + off0))) src poff plen
@@ -293,9 +317,35 @@ pushMany r@(Rotera base maxEventBytes maximumEvents deadZoneEvents staging _) le
         nextOff
       pure (nextEventId,nextOff)
     ) (eventId0,off0) lens
-  PM.writePrimArray staging 0 (eventId0 + events)
+  PM.writePrimArray stagingBuf 0 (eventId0 + events)
+  -- Release the writer lock
+  STM.atomically (STM.writeTVar writerVar WriterLockUnlocked)
   where
   MutableBytes src poff plen = payloads
+
+-- When this finishes running, the myLock argument is in 
+-- a WriterLockLocked in the var.
+acquireWriter :: TVar Bool -> TVar WriterLock -> IO ()
+acquireWriter !myLock !var = acquireWriterLoop myLock myLock var
+
+-- The purpose of this function is to notify the active writer
+-- that we need them to hurry up, or if there is no active writer
+-- acquire the writer lock.
+acquireWriterLoop :: TVar Bool -> TVar Bool -> TVar WriterLock -> IO ()
+acquireWriterLoop !myLock !prevSignal !var = do
+  res <- STM.atomically $ STM.readTVar var >>= \case
+    WriterLockUnlocked -> do
+      let !w = WriterLockLocked myLock
+      STM.writeTVar var w
+      pure Nothing
+    WriterLockLocked signal -> if signal == prevSignal
+      then STM.retry
+      else do
+        STM.writeTVar signal True
+        pure (Just signal)
+  case res of
+    Just signal -> acquireWriterLoop myLock signal var
+    Nothing -> pure ()
 
 vecMapM_ :: (Word32 -> IO a) -> PV.MVector RealWorld Word32 -> IO ()
 vecMapM_ f v = go 0 where
@@ -312,31 +362,43 @@ vecFoldl f !b0 !v = go 0 b0 where
 addrToPtr :: Addr -> Ptr a
 addrToPtr (PM.Addr x) = Ptr x
 
--- Blocks until all pushed events have been written to disk. This function
--- is not thread-safe. It should always be called from the same writer thread.
 commit :: Rotera -> IO ()
-commit (Rotera base maxEventBytes maximumEvents _ staging discourseVar) = do
+commit r@Rotera{writerVar} = do
+  myLock <- STM.newTVarIO False
+  acquireWriter myLock writerVar
+  internalCommit r
+  STM.atomically (STM.writeTVar writerVar WriterLockUnlocked)
+
+-- Blocks until all pushed events have been written to disk. This function
+-- is not thread-safe. It should always be called in a context where the
+-- caller has already acquired the writer lock.
+internalCommit :: Rotera -> IO ()
+internalCommit Rotera{base,maxEventBytes,maximumEvents,stagingBuf,eventRangeVar} = do
   MM.mmapSynchronize (addrToPtr base)
     (fromIntegral (4096 + maxEventBytes + (maximumEvents * PM.sizeOf (undefined :: Word))))
   oldNextEvent <- PM.readOffAddr base 2
-  newNextEvent <- PM.readPrimArray staging 0
+  newNextEvent <- PM.readPrimArray stagingBuf 0
   debug $ "commit: old next event was " ++ show oldNextEvent ++ " and new is " ++ show newNextEvent
   PM.writeOffAddr base 2 (newNextEvent :: Int)
   MM.mmapSynchronize (addrToPtr base) 4096
   when (oldNextEvent /= newNextEvent) $ STM.atomically $ do
-    Discourse inUse stopBlock _ lowestEvent <- STM.readTVar discourseVar
-    STM.writeTVar discourseVar $! Discourse inUse stopBlock newNextEvent lowestEvent
+    EventRange lowestEvent _ <- STM.readTVar eventRangeVar
+    STM.writeTVar eventRangeVar $! EventRange lowestEvent newNextEvent
     
 -- | Push a single event onto the queue. Its persistence is not guaranteed
---   until 'commit' is called. This function is not thread-safe. It should
---   always be called from the same writer thread.
+--   until 'commit' is called. This function is safe to use concurrently
+--   with itself.
 push :: Rotera -> ByteString -> IO ()
-push r@(Rotera base maxEventBytes maximumEvents deadZoneEvents staging _) (BSI.PS fp poff len) = do
+push r@Rotera{base,maxEventBytes,maximumEvents,deadZoneEvents,stagingBuf,writerVar} (BSI.PS fp poff len) = do
   -- Silently discard events that could lead to a situation where the dead zone
   -- is bigger than the whole queue. Maybe we should fail or return an indicator
   -- of this failure instead.
   if len < div maxEventBytes (deadZoneEvents + 2)
     then do
+      myLock <- STM.newTVarIO False
+      -- Discard the signal since there is not anything we can do
+      -- to hurry up.
+      acquireWriter myLock writerVar
       (eventId, off) <- accomodate r 1 len
       FP.withForeignPtr fp $ \(Ptr p) -> do
         let src = PM.Addr p
@@ -358,12 +420,14 @@ push r@(Rotera base maxEventBytes maximumEvents deadZoneEvents staging _) (BSI.P
         (PM.plusAddr base (4096 + maxEventBytes))
         nextOffsetPos
         nextOffset
-      PM.writePrimArray staging 0 (eventId + 1)
+      PM.writePrimArray stagingBuf 0 (eventId + 1)
+      -- Release the writer lock
+      STM.atomically (STM.writeTVar writerVar WriterLockUnlocked)
     else fail "push: too big"
 
 roteraResolutionTable :: Rotera -> Ptr Int
-roteraResolutionTable (Rotera base eventSectionSize _ _ _ _) =
-  let !(PM.Addr a) = PM.plusAddr base (4096 + eventSectionSize) in Ptr a
+roteraResolutionTable Rotera{base,maxEventBytes} =
+  let !(PM.Addr a) = PM.plusAddr base (4096 + maxEventBytes) in Ptr a
 
 unPtr :: Ptr a -> Addr#
 unPtr (Ptr x) = x
@@ -399,3 +463,19 @@ unPtr (Ptr x) = x
 --   PV.Vector Word32 -- sizes of the messages
 --   Bytes -- all the messages concatenated
 
+-- Another attempt.
+-- The protocol is something like:
+-- * Client sends request type and attributes (fixed size)
+-- * Client sends request body (size known from request type)
+-- * Server might respond depending on the request type
+-- The three types of requests are:
+-- * Commit Uuid (flush changes to this queue)
+--   Response is an acknowledgement
+-- * Push Uuid MsgCount -> followed by msg lens and then by concatenated messages
+--   Server does not acknowledge this
+-- * Read Uuid Blockingness (Int64 | MostRecent) Word64 -> followed by nothing
+--   Server responds with messages
+-- * Ping -> followed by nothing
+--   Server responds
+-- All server responses include a byte for graceful shutdown.
+-- This tells the client that it needs to shutdown the connection.

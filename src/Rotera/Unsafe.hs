@@ -1,77 +1,84 @@
 {-# language BangPatterns #-}
+{-# language NamedFieldPuns #-}
+{-# language RankNTypes #-}
 
 module Rotera.Unsafe
   ( Rotera(..)
   , Discourse(..)
+  , ReadTicket(..)
+  , NonblockingResult(..)
+  , EventRange(..)
+  , WriterLock(..)
     -- * Internal
   , nonblockingLockEvent
   , blockingLockEvent
-  , unlockEvent
+  , removeReadTicket
   ) where
 
 import Control.Monad.ST (ST,runST)
 import Control.Concurrent.STM (TVar)
 import Data.Primitive.Addr (Addr)
 import Data.Primitive (SmallArray,PrimArray,MutablePrimArray)
+import Data.Primitive (SmallMutableArray)
 import GHC.Exts (RealWorld)
 
 import qualified Control.Concurrent.STM as STM
 import qualified Data.Primitive as PM
+import qualified Data.Primitive.PrimArray.Atomic as PM
 
 -- | A persisted rotating queue that removes the oldest entries as new
 --   entries come in.
 data Rotera = Rotera
-  !Addr
-  -- Address of the memory-mapped file used for persistence. This
-  -- is the address of the header page that preceeds the data section
-  -- of the file.
-  !Int
-  -- Maximum number of bytes used to preserve logs. By adding this
-  -- to the data section address, one can compute the address of the
-  -- resolution table.
-  !Int
-  -- Maximum number of events persisted. This determines the size of
-  -- the resolution table.
-  !Int
-  -- Dead zone size. This is number of events that exist as a buffer
-  -- between the oldest event and the newest event. The dead zone
-  -- helps prevent contention.
-  !(MutablePrimArray RealWorld Int)
-  -- A singleton array holding the staged next event id.
-  !(TVar Discourse)
-  -- This is the reader and writer lock. It contains an array of all event numbers
-  -- in use. The writer updates the minimal event number every time before it
-  -- attempts to acquire the lock. That means that the number
-  -- is incremented before the actual deletions
-  -- happen. So, it is possible that the lowest event number in
-  -- the array is lower than the oldest active id. That is fine since the writer
-  -- will keep reacquiring the lock until the old reader has dropped out.
-  -- The preemptive bump of the oldest active event number means that new
-  -- readers can join while the writer is waiting and they will not block
-  -- the writer. The writer thread uses the minimal element in this array
-  -- to decide whether or not it can safely delete old events. Both
-  -- the writer thread and the reader threads hold this lock for
-  -- very brief periods of time. However, they acquire it differently.
-  -- The readers acquires it both before reading events and after reading
-  -- events. The writer acquires it every time it tries to push. If it
-  -- detects that there is a reader of old events, it will repeatedly
-  -- attempt to reacquire it every time a reader drops out. Eventually,
-  -- the reader of old events must leave.
-  -- !(PM.MVar RealWorld ())
-  -- This is used to signal the writer thread that it should try again.
-  -- This only matters when a reader is reading very old events that
-  -- the writer is waiting to overwrite. To send a signal, this library
-  -- calls take immidiately followed by put. This means that sending a
-  -- signal can block. It blocks if another reader is simultaneously
-  -- sending a signal or if the writer is already checking to see if
-  -- it is safe to delete old events.
-  -- !(TVar Int)
-  -- The most recently committed value for next event id
-  -- !(TVar Int)
-  -- The oldest available id
+  { base :: !Addr
+    -- Address of the memory-mapped file used for persistence. This
+    -- is the address of the header page that preceeds the data section
+    -- of the file.
+  , maxEventBytes :: !Int
+    -- Maximum number of bytes used to preserve logs. By adding this
+    -- to the data section address, one can compute the address of the
+    -- resolution table.
+  , maximumEvents :: !Int
+    -- Maximum number of events persisted. This determines the size of
+    -- the resolution table.
+  , deadZoneEvents :: !Int
+    -- Dead zone size. This is number of events that exist as a buffer
+    -- between the oldest event and the newest event. The dead zone
+    -- helps prevent contention.
+  , stagingBuf :: !(MutablePrimArray RealWorld Int)
+    -- A singleton array holding the staged next event id.
+  , activeReadersVar :: !(TVar (SmallArray ReadTicket))
+    -- Information about all the active readers.
+  , eventRangeVar :: !(TVar EventRange)
+    -- The oldest available id, and the most recently committed
+    -- value for next event id.
+  , writerVar :: !(TVar WriterLock)
+    -- This serves two purposes. It acts as a lock that a writer
+    -- takes to gain exclusive access to the queue, and it provides
+    -- a way for competing writer to tell the active writer to
+    -- hurry up. Hurrying means writing everything to auxiliary
+    -- memory and performing a memcpy once everything has arrived.
+  }
 
+data WriterLock
+  = WriterLockLocked !(TVar Bool)
+  | WriterLockUnlocked
 
--- TODO: split discource into two data types. One will have the
+-- Oldest event id and next event id
+data EventRange = EventRange !Int !Int
+
+-- Globally, for readers, we have:
+-- (TVar (SmallArray ReadTicket), TVar Int, TVar Int)
+-- And each individual reader holds onto its ticket id and
+-- its signal locally.
+--
+-- Globally, for writers, we have:
+-- (TVar (Maybe (TVar Bool)))
+-- And each writer holds onto its signal locally. If there
+-- is a signal present in the global TVar, it means that
+-- someone is writing to the queue. A competing writer can use this
+-- signal to tell the other writer to hurry up.
+
+-- TODO: split discourse into three data types. One will have the
 -- arrays and the other will have the metadata. The reason is
 -- that the metadata should only ever get written to by the
 -- writer thread. This will prevent unneeded wakeups.
@@ -81,27 +88,47 @@ data Discourse = Discourse
   !Int -- most recent committed id plus one, committed
   !Int -- oldest available id, both staged and committed
 
+-- Take a ticket when you are reading from the queue
+data ReadTicket = ReadTicket
+  !Int
+  -- The lowest id in the batch being read
+  !(TVar Bool)
+  -- A signal a writer can use to tell this reader
+  -- to stop performing blocking IO
+
 -- Remove an event id from the array. This is called when a reader
 -- is shutting down.
-removeEvent ::
-     MutablePrimArray s Int
-  -> PrimArray Int
-  -> Int -- event id to remove, should be present in array
-  -> ST s (Int,PrimArray Int)
-removeEvent !m !old !eventId = go 0
+removeReadTicket ::
+     SmallArray ReadTicket
+  -> TVar Bool -- read ticket TVar
+  -> SmallArray ReadTicket
+removeReadTicket !old !identNeedle = runST $ do
+  let sz = PM.sizeofSmallArray old
+  marr <- PM.newSmallArray (sz - 1) errorThunk
+  go marr (sz - 1) (sz - 2)
   where
-  !sz = PM.sizeofPrimArray old
-  go !ix = if ix < sz
+  go :: forall s. SmallMutableArray s ReadTicket -> Int -> Int -> ST s (SmallArray ReadTicket)
+  go !marr !ixSrc !ixDst = if ixDst >= 0
     then do
-      let oldEventId = PM.indexPrimArray old ix
-      if oldEventId == eventId
-        then do
-          PM.writePrimArray m ix maxBound
-          PM.copyPrimArray m (ix + 1) old (ix + 1) (sz - (ix + 1))
-          m' <- PM.unsafeFreezePrimArray m
-          pure (ix,m')
-        else go (ix + 1)
-    else error "removeEvent did not find the identifier"
+      let r@(ReadTicket _ ident) = PM.indexSmallArray old ixSrc
+      if ident == identNeedle
+        then go marr (ixSrc - 1) ixDst
+        else do
+          PM.writeSmallArray marr ixDst r
+          go marr (ixSrc - 1) (ixDst - 1)
+    else PM.unsafeFreezeSmallArray marr
+
+errorThunk :: a
+{-# NOINLINE errorThunk #-}
+errorThunk = error "rotera: whomp"
+
+snocSmallArray :: a -> SmallArray a -> SmallArray a
+{-# inline snocSmallArray #-}
+snocSmallArray x arr = runST $ do
+  let sz = PM.sizeofSmallArray arr
+  marr <- PM.newSmallArray (sz + 1) x
+  PM.copySmallArray marr 0 arr 0 sz
+  PM.unsafeFreezeSmallArray marr
 
 -- If all of the read slots are taken, this creates a copy of the array
 -- with one extra slot at the end. We use the max bound of Int to mean
@@ -112,7 +139,7 @@ assignEvent ::
      MutablePrimArray s Int
   -> SmallArray (TVar Bool)
   -> PrimArray Int
-  -> TVar Bool -- Having this argument here is foolish, but it is convenient
+  -> TVar Bool
   -> Int -- event identifier
   -> ST s (PrimArray Int,SmallArray (TVar Bool),TVar Bool)
 assignEvent !new !stopBlock !old !extraStop !eventId = go 0
@@ -140,28 +167,33 @@ assignEvent !new !stopBlock !old !extraStop !eventId = go 0
       newStop' <- PM.unsafeFreezeSmallArray newStop
       pure (new',newStop',extraStop)
 
-nonblockingLockEvent :: TVar Discourse -> Int -> Int -> IO (Int,Int,TVar Bool)
-nonblockingLockEvent !discourseVar !requestedEventId !reqEvts = do
-  -- TODO: stop allocating this tvar here
-  extraStop <- STM.newTVarIO False
-  STM.atomically $ do
-    Discourse inUse stopBlock nextEvent lowestEvent <- STM.readTVar discourseVar
-    let (actualEvts,actualEventId) = if requestedEventId == (-1)
-          then
-            let y = min reqEvts (nextEvent - lowestEvent)
-             in (y,nextEvent - y)
-          else
-            let x = max requestedEventId lowestEvent
-             in (min reqEvts (nextEvent - x),x)
-    if actualEvts > 0
-      then do
-        let (newInUse,newStopBlock,signal) = runST $ do
-              let inUseSz = PM.sizeofPrimArray inUse
-              buf <- PM.newPrimArray (inUseSz + 1)
-              assignEvent buf stopBlock inUse extraStop actualEventId
-        STM.writeTVar discourseVar $! Discourse newInUse newStopBlock nextEvent lowestEvent
-        pure (actualEventId,actualEvts,signal)
-      else pure (0,0,extraStop)
+-- Is there data to be read or not?
+data NonblockingResult
+  = NonblockingResultSomething !Int !Int !(TVar Bool)
+  | NonblockingResultNothing !Int
+
+nonblockingLockEvent ::
+     Rotera
+  -> Int
+  -> Int
+  -> IO NonblockingResult
+nonblockingLockEvent Rotera{activeReadersVar,eventRangeVar} !requestedEventId !reqEvts = STM.atomically $ do
+  EventRange lowestEvent nextEvent <- STM.readTVar eventRangeVar
+  let (actualEvts,actualEventId) = if requestedEventId == (-1)
+        then
+          let y = min reqEvts (nextEvent - lowestEvent)
+           in (y,nextEvent - y)
+        else
+          let x = max requestedEventId lowestEvent
+           in (min reqEvts (nextEvent - x),x)
+  if actualEvts > 0
+    then do
+      activeReaders <- STM.readTVar activeReadersVar
+      newSignal <- STM.newTVar False
+      let !newTicket = ReadTicket actualEventId newSignal
+      STM.writeTVar activeReadersVar $! snocSmallArray newTicket activeReaders
+      pure $! NonblockingResultSomething actualEventId actualEvts newSignal
+    else pure (NonblockingResultNothing actualEventId)
 
 blockingLockEvent :: TVar Discourse -> Int -> IO Int
 blockingLockEvent !discourseVar !requestedEventId = do
@@ -179,13 +211,3 @@ blockingLockEvent !discourseVar !requestedEventId = do
         STM.writeTVar discourseVar $! Discourse newInUse newStopBlock nextEvent lowestEvent
         pure actualEventId
       else STM.retry
-
-unlockEvent :: TVar Discourse -> Int -> IO ()
-unlockEvent !discourseVar !eventId = STM.atomically $ do
-  Discourse inUse stopBlock nextEvent lowestEvent <- STM.readTVar discourseVar
-  let (ix,newInUse) = runST $ do
-        let sz = PM.sizeofPrimArray inUse
-        newInUse' <- PM.newPrimArray sz
-        removeEvent newInUse' inUse eventId
-  STM.writeTVar (PM.indexSmallArray stopBlock ix) False
-  STM.writeTVar discourseVar $! Discourse newInUse stopBlock nextEvent lowestEvent
