@@ -2,7 +2,7 @@ packages: .
 source-repository-package
   type: git
   location: https://github.com/andrewthad/byte-order
-  tag: 797fb01681b6164ee2e90605d293f7aca855dd25
+  tag: 91903467fbb5833990d6729c6650e5ff65765a16
 source-repository-package
   type: git
   location: https://github.com/andrewthad/mmap

@@ -7,6 +7,7 @@ module Rotera.Unsafe
   , Discourse(..)
   , ReadTicket(..)
   , NonblockingResult(..)
+  , BlockingResult(..)
   , EventRange(..)
   , WriterLock(..)
     -- * Internal
@@ -172,6 +173,8 @@ data NonblockingResult
   = NonblockingResultSomething !Int !Int !(TVar Bool)
   | NonblockingResultNothing !Int
 
+data BlockingResult = BlockingResult !Int !Int !(TVar Bool)
+
 nonblockingLockEvent ::
      Rotera
   -> Int
@@ -179,13 +182,8 @@ nonblockingLockEvent ::
   -> IO NonblockingResult
 nonblockingLockEvent Rotera{activeReadersVar,eventRangeVar} !requestedEventId !reqEvts = STM.atomically $ do
   EventRange lowestEvent nextEvent <- STM.readTVar eventRangeVar
-  let (actualEvts,actualEventId) = if requestedEventId == (-1)
-        then
-          let y = min reqEvts (nextEvent - lowestEvent)
-           in (y,nextEvent - y)
-        else
-          let x = max requestedEventId lowestEvent
-           in (min reqEvts (nextEvent - x),x)
+  let actualEventId = max requestedEventId lowestEvent
+      actualEvts = min reqEvts (nextEvent - actualEventId)
   if actualEvts > 0
     then do
       activeReaders <- STM.readTVar activeReadersVar
@@ -195,19 +193,22 @@ nonblockingLockEvent Rotera{activeReadersVar,eventRangeVar} !requestedEventId !r
       pure $! NonblockingResultSomething actualEventId actualEvts newSignal
     else pure (NonblockingResultNothing actualEventId)
 
-blockingLockEvent :: TVar Discourse -> Int -> IO Int
-blockingLockEvent !discourseVar !requestedEventId = do
-  -- TODO: stop allocating this tvar here
-  extraStop <- STM.newTVarIO False
-  STM.atomically $ do
-    Discourse inUse stopBlock nextEvent lowestEvent <- STM.readTVar discourseVar
-    if requestedEventId < nextEvent
-      then do
-        let actualEventId = max requestedEventId lowestEvent
-            (newInUse,newStopBlock,_) = runST $ do
-              let inUseSz = PM.sizeofPrimArray inUse
-              buf <- PM.newPrimArray (inUseSz + 1)
-              assignEvent buf stopBlock inUse extraStop actualEventId
-        STM.writeTVar discourseVar $! Discourse newInUse newStopBlock nextEvent lowestEvent
-        pure actualEventId
-      else STM.retry
+-- TODO: There is some duplicated code in the blocking and nonblocking
+-- variants of lock event. Factor this out.
+blockingLockEvent ::
+     Rotera
+  -> Int
+  -> Int
+  -> IO BlockingResult
+blockingLockEvent Rotera{activeReadersVar,eventRangeVar} !requestedEventId !reqEvts = STM.atomically $ do
+  EventRange lowestEvent nextEvent <- STM.readTVar eventRangeVar
+  let actualEventId = max requestedEventId lowestEvent
+      actualEvts = min reqEvts (nextEvent - actualEventId)
+  if actualEvts > 0
+    then do
+      activeReaders <- STM.readTVar activeReadersVar
+      newSignal <- STM.newTVar False
+      let !newTicket = ReadTicket actualEventId newSignal
+      STM.writeTVar activeReadersVar $! snocSmallArray newTicket activeReaders
+      pure $! BlockingResult actualEventId actualEvts newSignal
+    else STM.retry

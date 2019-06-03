@@ -5,7 +5,7 @@
 {-# language NamedFieldPuns #-}
 
 module Rotera
-  ( Rotera
+  ( Rotera(..)
   , Settings(..)
   , pushMany
   , push
@@ -21,6 +21,7 @@ import Rotera.Unsafe (WriterLock(..))
 import Control.Concurrent.STM (STM,TVar)
 import Control.Monad (when)
 import Control.Monad.ST (runST,ST)
+import Data.Primitive (Prim)
 import Data.ByteString (ByteString)
 import Data.Bytes.Types (MutableBytes(..))
 import Data.Primitive (MutableByteArray,ByteArray)
@@ -281,16 +282,19 @@ waitForReadsPhase2 !expectedLowestEvent !var = STM.atomically $ do
 
 -- Invariant: the length of payloads is equal to the sum of the elements
 -- in sizes.
-pushMany ::
-     Rotera
-  -> PV.MVector RealWorld Word32 -- ^ sizes (length is total number of events)
+pushMany :: (Integral a, Prim a)
+  => Rotera
+  -> PV.MVector RealWorld a -- ^ sizes (length is total number of events)
   -> MutableBytes RealWorld -- ^ all data bytes smashed together
   -> IO ()
+{-# inline pushMany #-}
 pushMany r@Rotera{base,maxEventBytes,maximumEvents,deadZoneEvents,stagingBuf,writerVar} lens payloads = do
   let events = PV.length lens
-  -- Perform sanity check
+  -- Perform sanity check.
+  -- TODO: Stop doing this here. The server must already fold over
+  -- the lengths to calculate the total.
   vecMapM_
-    (\len -> if fromIntegral len >= div maxEventBytes (deadZoneEvents + 2)
+    (\len -> if fromIntegral len > div maxEventBytes (deadZoneEvents + 2)
       then fail "pushMany: event too big"
       else pure ()
     ) lens
@@ -347,13 +351,14 @@ acquireWriterLoop !myLock !prevSignal !var = do
     Just signal -> acquireWriterLoop myLock signal var
     Nothing -> pure ()
 
-vecMapM_ :: (Word32 -> IO a) -> PV.MVector RealWorld Word32 -> IO ()
+vecMapM_ :: Prim a => (a -> IO b) -> PV.MVector RealWorld a -> IO ()
+{-# inline vecMapM_ #-}
 vecMapM_ f v = go 0 where
   go !ix = if ix < PV.length v
     then (f =<< PV.unsafeRead v ix) *> go (ix + 1)
     else pure ()
 
-vecFoldl :: (b -> Word32 -> IO b) -> b -> PV.MVector RealWorld Word32 -> IO b
+vecFoldl :: Prim a => (b -> a -> IO b) -> b -> PV.MVector RealWorld a -> IO b
 vecFoldl f !b0 !v = go 0 b0 where
   go !ix !b = if ix < PV.length v
     then (f b =<< PV.unsafeRead v ix) >>= go (ix + 1)

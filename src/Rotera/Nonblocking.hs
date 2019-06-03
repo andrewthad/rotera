@@ -13,7 +13,8 @@
 module Rotera.Nonblocking
   ( read
   , readMany
-  , readIntoSocket
+  , readIntoSocketNonblocking
+  , readIntoSocketBlocking
   -- , with
   ) where
 
@@ -32,6 +33,7 @@ import Data.Primitive.Unlifted.Array (UnliftedArray)
 import GHC.Exts (Ptr(..),MutableByteArray#,Addr#,RealWorld,touch#)
 import GHC.IO (IO(..))
 import Rotera.Unsafe (Rotera(..),NonblockingResult(..),ReadTicket)
+import Rotera.Unsafe (BlockingResult(..),blockingLockEvent)
 import Rotera.Unsafe (nonblockingLockEvent,removeReadTicket)
 import System.ByteOrder (Fixed(..),ByteOrder(LittleEndian))
 
@@ -53,23 +55,17 @@ import qualified Socket.Stream.Uninterruptible.MutableBytes as SMBU
 -- the first message id. The third one needs to be filled in
 -- with the number of messages in this batch. The remainder of
 -- the array is enough 32-bit slots to hold all the lengths.
-readIntoSocket ::
+readIntoSocketNonblocking ::
      Rotera
   -> ByteArray -- peer description
   -> Int -- minimum message id
   -> Int -- maximum number of messages
   -> Connection -- connection to peer
   -> MutableByteArray RealWorld
-     -- ^ reusable msg-length buffer, the 
+     -- ^ reusable msg-length buffer
   -> IO (Maybe Int) -- number of messages, or Nothing if error
-readIntoSocket r@Rotera{base,activeReadersVar,maxEventBytes} descr reqId maxEvts conn lenBuf = do
+readIntoSocketNonblocking r descr reqId maxEvts conn lenBuf = do
   nonblockingLockEvent r reqId maxEvts >>= \case
-    -- Rethink this. If someone uses the blocking interface,
-    -- this first case cannot actually happen. It may be better
-    -- to have a dedicate blocking read and nonblocking read
-    -- in Rotera.Socket instead of having this single function
-    -- here. Then we could also be much more aggresive with
-    -- recursion.
     NonblockingResultNothing latestEventId -> do
       PM.writeByteArray lenBuf 1
         (Fixed (fromIntegral latestEventId) :: Fixed 'LittleEndian Word64)
@@ -78,47 +74,73 @@ readIntoSocket r@Rotera{base,activeReadersVar,maxEventBytes} descr reqId maxEvts
       SMBU.send conn (MutableBytes lenBuf 0 24) >>= \case
         Left err -> Nothing <$ documentSendException descr err
         Right _ -> pure (Just 0)
-    NonblockingResultSomething actualEventId actualEvts signal -> do
-      PM.writeByteArray lenBuf 1
-        (Fixed (fromIntegral actualEventId) :: Fixed 'LittleEndian Word64)
-      PM.writeByteArray lenBuf 2
-        (Fixed (fromIntegral actualEvts) :: Fixed 'LittleEndian Word64)
-      let lastEventSucc = actualEventId + actualEvts
-      totalBytes <- copyOffsets r
-        (typed @(Fixed 'LittleEndian Word32) lenBuf) actualEventId lastEventSucc 6
-      (off,offNext) <- calculateOffsets r actualEventId actualEvts
-      (!addr,!x) <- mergePossibleSplit base lenBuf maxEventBytes off offNext
-      -- TODO: It is tempting to try to merge these two with
-      -- sendmsg. However, it makes handling the signal more
-      -- difficult.
-      SMBU.send conn (MutableBytes lenBuf 0 (24 + actualEvts * 4)) >>= \case
-        Left err -> Nothing <$ documentSendException descr err
-        Right _ -> SAI.send signal conn addr totalBytes >>= \case
-          Left err -> case err of
-            SendShutdown -> Nothing <$ printPrefixed descr
-              "[warn] Client closed connection while server was sending messages.\n"
-            SendReset -> Nothing <$ printPrefixed descr
-              "[warn] Client reset connection while server was sending messages.\n"
-            SendInterrupted transmitted -> do
-              printPrefixed descr
-                "[info] Using anciliary memory for client reading expiring messages.\n"
-              let remaining = totalBytes - transmitted
-              buf <- PM.newByteArray remaining
-              PM.copyAddrToByteArray buf 0 (PM.plusAddr addr transmitted) remaining
-              touchMutableByteArray x
-              unlockEvent signal activeReadersVar
-              SMBU.send conn (MutableBytes buf 0 remaining) >>= \case
-                Left errX -> case errX of
-                  -- TODO: deduplicate
-                  SendShutdown -> Nothing <$ printPrefixed descr
-                    "[warn] Client closed connection while server was sending messages.\n"
-                  SendReset -> Nothing <$ printPrefixed descr
-                    "[warn] Client reset connection while server was sending messages.\n"
-                Right _ -> pure (Just actualEvts)
-          Right _ -> do
-            touchMutableByteArray x
-            unlockEvent signal activeReadersVar
-            pure (Just actualEvts)
+    NonblockingResultSomething actualEventId actualEvts signal ->
+      readIntoSocketCommon r conn descr lenBuf actualEventId actualEvts signal
+
+readIntoSocketBlocking ::
+     Rotera
+  -> ByteArray -- peer description
+  -> Int -- minimum message id
+  -> Int -- maximum number of messages
+  -> Connection -- connection to peer
+  -> MutableByteArray RealWorld
+     -- ^ reusable msg-length buffer
+  -> IO (Maybe Int) -- number of messages, or Nothing if error
+readIntoSocketBlocking r descr reqId maxEvts conn lenBuf = do
+  blockingLockEvent r reqId maxEvts >>= \case
+    BlockingResult actualEventId actualEvts signal ->
+      readIntoSocketCommon r conn descr lenBuf actualEventId actualEvts signal
+
+readIntoSocketCommon ::
+     Rotera
+  -> Connection
+  -> ByteArray
+  -> MutableByteArray RealWorld
+  -> Int
+  -> Int
+  -> TVar Bool
+  -> IO (Maybe Int)
+readIntoSocketCommon r@Rotera{base,maxEventBytes,activeReadersVar} conn descr lenBuf actualEventId actualEvts signal = do
+  PM.writeByteArray lenBuf 1
+    (Fixed (fromIntegral actualEventId) :: Fixed 'LittleEndian Word64)
+  PM.writeByteArray lenBuf 2
+    (Fixed (fromIntegral actualEvts) :: Fixed 'LittleEndian Word64)
+  let lastEventSucc = actualEventId + actualEvts
+  totalBytes <- copyOffsets r
+    (typed @(Fixed 'LittleEndian Word32) lenBuf) actualEventId lastEventSucc 6
+  (off,offNext) <- calculateOffsets r actualEventId actualEvts
+  (!addr,!x) <- mergePossibleSplit base lenBuf maxEventBytes off offNext
+  -- TODO: It is tempting to try to merge these two with
+  -- sendmsg. However, it makes handling the signal more
+  -- difficult.
+  SMBU.send conn (MutableBytes lenBuf 0 (24 + actualEvts * 4)) >>= \case
+    Left err -> Nothing <$ documentSendException descr err
+    Right _ -> SAI.send signal conn addr totalBytes >>= \case
+      Left err -> case err of
+        SendShutdown -> Nothing <$ printPrefixed descr
+          "[warn] Client closed connection while server was sending messages.\n"
+        SendReset -> Nothing <$ printPrefixed descr
+          "[warn] Client reset connection while server was sending messages.\n"
+        SendInterrupted transmitted -> do
+          printPrefixed descr
+            "[info] Using anciliary memory for client reading expiring messages.\n"
+          let remaining = totalBytes - transmitted
+          buf <- PM.newByteArray remaining
+          PM.copyAddrToByteArray buf 0 (PM.plusAddr addr transmitted) remaining
+          touchMutableByteArray x
+          unlockEvent signal activeReadersVar
+          SMBU.send conn (MutableBytes buf 0 remaining) >>= \case
+            Left errX -> case errX of
+              -- TODO: deduplicate
+              SendShutdown -> Nothing <$ printPrefixed descr
+                "[warn] Client closed connection while server was sending messages.\n"
+              SendReset -> Nothing <$ printPrefixed descr
+                "[warn] Client reset connection while server was sending messages.\n"
+            Right _ -> pure (Just actualEvts)
+      Right _ -> do
+        touchMutableByteArray x
+        unlockEvent signal activeReadersVar
+        pure (Just actualEvts)
 
 documentSendException :: ByteArray -> SendException 'Uninterruptible -> IO ()
 documentSendException descr = \case

@@ -16,18 +16,19 @@ import Control.Exception (throwIO)
 import Data.Bytes.Types (MutableBytes(..))
 import Rotera.Unsafe (Rotera)
 import Data.ByteString (ByteString)
-import Data.IORef (IORef,readIORef)
 import Data.Primitive (MutableByteArray(..),ByteArray,MutablePrimArray(..))
 import Data.Primitive (PrimArray,SmallArray,Prim)
 import Data.Word (Word32,Word64)
 import GHC.Exts (RealWorld)
 import Control.Concurrent (ThreadId)
+import Rotera.Unsafe (EventRange(..),Rotera(..))
 import System.ByteOrder (Fixed(Fixed),ByteOrder(LittleEndian))
 import Socket.Stream.IPv4 (Connection,SendException(..))
 import Socket.Stream.IPv4 (CloseException(..),ReceiveException(..))
 import Socket.Stream.IPv4 (Interruptibility(..),Peer(..))
 import Socket.Stream.IPv4 (AcceptException(..))
 
+import qualified Data.Vector.Primitive.Mutable as PV
 import qualified Control.Concurrent.STM as STM
 import qualified Net.IPv4 as IPv4
 import qualified Socket.Stream.IPv4 as SCK
@@ -51,10 +52,13 @@ data Static = Static
   !(MutableByteArray RealWorld)
   -- response buffer, exactly 8 bytes
   !(PrimArray Word32) -- queue resolver
-  !(SmallArray Rotera) -- data for each queue
+  !(SmallArray Rotera) -- data for each queue, same length as resolver
 
 data Dynamic = Dynamic
   -- request buffer for sizes of messages
+  !(MutableByteArray RealWorld)
+  -- request buffer for concatenated payloads, needed
+  -- for concurrent ingest
   !(MutableByteArray RealWorld)
 
 server ::
@@ -62,11 +66,13 @@ server ::
      -- ^ Interrupt. When this becomes @True@, stop accepting
      -- new connections and gracefully close all open
      -- connections.
-  -> String
-     -- ^ Path to rotera
+  -> PrimArray Word32
+     -- ^ Queue resolver
+  -> SmallArray Rotera
+     -- ^ Metadata for each queue, must be the same
+     -- length as the queue resolver.
   -> IO ()
-server intr path = do
-  r <- Rotera.open path
+server intr resolver roteras = do
   e <- SCK.withListener
     Peer{address=IPv4.loopback,port=8245}
     (\lstn prt -> do
@@ -95,12 +101,16 @@ server intr path = do
                   ]
                 reqBuf <- PM.newByteArray reqSz
                 respBuf <- PM.newByteArray 8
-                let resolver = E.fromList [42]
-                let rs = E.fromList [r]
                 let static = Static
-                      intr conn descr reqBuf respBuf resolver rs
-                reqBuf <- PM.newByteArray 64 -- no reason
-                handleConnection static (Dynamic reqBuf)
+                      intr conn descr reqBuf respBuf resolver roteras
+                -- No real reason for the reqBuf to start at 64 bytes.
+                -- It must be at least 32 bytes to handle requests.
+                reqBuf <- PM.newByteArray 64 
+                -- The payload buffer really should start at zero. Not
+                -- for correctness but because there is no way to
+                -- estimate the size of what we will be receiving.
+                payloadBuf <- PM.newByteArray 0
+                handleConnection static (Dynamic reqBuf payloadBuf)
                 pure descr
               )
             case e of
@@ -146,7 +156,7 @@ handleConnection ::
      Static
   -> Dynamic
   -> IO ()
-handleConnection static@(Static intr conn descr reqBuf respBuf resolver roteras) (Dynamic msgSizes0) = do
+handleConnection static@(Static intr conn descr reqBuf respBuf resolver roteras) (Dynamic msgSizes0 payloadBuf0) = do
   SMB.receiveExactly conn (MutableBytes reqBuf 0 reqSz) >>= \case
     Left err -> documentExceptionCommand descr err
     Right _ -> decodeReq reqBuf >>= \case
@@ -162,12 +172,26 @@ handleConnection static@(Static intr conn descr reqBuf respBuf resolver roteras)
             ]
           Just queueIx -> do
             let msgCount = fromIntegral msgCountW :: Int
+            let r = PM.indexSmallArray roteras queueIx
             msgSizes1 <- ensureCapacity msgSizes0 (msgCount * 4)
             SMB.receiveExactly conn (MutableBytes msgSizes1 0 (msgCount * 4)) >>= \case
               Left err -> documentExceptionPush descr err
-              Right _ -> do
-                -- TODO: actually handle this
-                handleConnection static (Dynamic msgSizes1)
+              Right (_ :: ()) -> do
+                -- TODO: Attempt to load the payload directly into
+                -- the mmapped region.
+                let msgSzVec :: PV.MVector RealWorld (Fixed 'LittleEndian Word32)
+                    msgSzVec = PV.MVector 0 msgCount msgSizes1 
+                payloadSz <- vecFoldl
+                  (\x y -> pure (x + fromIntegral y))
+                  (0 :: Int)
+                  msgSzVec
+                payloadBuf1 <- ensureCapacity payloadBuf0 payloadSz
+                SMB.receiveExactly conn (MutableBytes payloadBuf1 0 payloadSz) >>= \case
+                  Left err -> documentExceptionPush descr err
+                  Right (_ :: ()) -> do
+                    Rotera.pushMany r msgSzVec
+                      (MutableBytes payloadBuf1 0 payloadSz)
+                    handleConnection static (Dynamic msgSizes1 payloadBuf1)
         Read queue firstIdentW msgCountW -> case resolve resolver queue of
           Nothing -> BC.putStr $ BC.concat
             [ BU.toByteString descr
@@ -189,7 +213,7 @@ handleConnection static@(Static intr conn descr reqBuf respBuf resolver roteras)
             intrVal <- STM.readTVarIO intr
             PM.writeByteArray msgSizes1 0
               (Fixed @'LittleEndian (intrToIdent intrVal))
-            NB.readIntoSocket r descr firstIdent msgCount conn msgSizes1 >>= \case
+            NB.readIntoSocketNonblocking r descr firstIdent msgCount conn msgSizes1 >>= \case
               Nothing -> pure ()
               Just actualCount -> do
                 BC.putStr $ BC.concat
@@ -198,14 +222,86 @@ handleConnection static@(Static intr conn descr reqBuf respBuf resolver roteras)
                   , BC.pack (show actualCount)
                   , " messages.\n"
                   ]
-                handleConnection static (Dynamic msgSizes1)
-        Ping -> do
-          intrVal <- STM.readTVarIO intr
-          PM.writeByteArray respBuf 0
-            (Fixed @'LittleEndian (intrToIdent intrVal))
-          SMB.send conn (MutableBytes respBuf 0 8) >>= \case
-            Left err -> documentPingSendException descr err
-            Right _ -> handleConnection static (Dynamic msgSizes0)
+                handleConnection static (Dynamic msgSizes1 payloadBuf0)
+        ReadStream queue msgsPerChunkW firstIdentW msgCountW -> case resolve resolver queue of
+          Nothing -> BC.putStr $ BC.concat
+            [ BU.toByteString descr
+            , "[warn] Client tried to read from non-existing queue.\n"
+            ]
+          Just queueIx -> do
+            BC.putStr $ BC.concat
+              [ BU.toByteString descr
+              , "[debug] Streaming up to "
+              , BC.pack (show msgCountW)
+              , " messages in chunks of "
+              , BC.pack (show msgsPerChunkW)
+              , " starting from "
+              , BC.pack (show firstIdentW)
+              , ".\n"
+              ]
+            let r = PM.indexSmallArray roteras queueIx
+                firstIdent = fromIntegral firstIdentW :: Int
+                msgCount = fromIntegral msgCountW :: Int
+                msgsPerChunk = fromIntegral msgsPerChunkW :: Int
+            msgSizes1 <- ensureCapacity msgSizes0 (24 + (msgsPerChunk * 4))
+            -- TODO: Graceful shutdown does not really work correctly
+            -- with the streaming interface right now. The problem is
+            -- that if we are blocking because we are at the head of
+            -- the queue and no new messages are coming in, we never
+            -- tell the client that we are done sending stuff. This
+            -- is not terribly difficult to fix.
+            let go !msgIdent !remaining = if remaining > 0
+                  then do
+                    intrVal <- STM.readTVarIO intr
+                    PM.writeByteArray msgSizes1 0
+                      (Fixed @'LittleEndian (intrToIdent intrVal))
+                    NB.readIntoSocketBlocking r descr msgIdent (min msgsPerChunk remaining) conn msgSizes1 >>= \case
+                      Nothing -> pure ()
+                      Just actualCount -> go (msgIdent + actualCount) (remaining - actualCount)
+                  else do
+                    BC.putStr $ BC.concat
+                      [ BU.toByteString descr
+                      , "[debug] Finished streaming "
+                      , BC.pack (show msgCount)
+                      , " messages.\n"
+                      ]
+                    handleConnection static (Dynamic msgSizes1 payloadBuf0)
+            go firstIdent msgCount
+        Commit queue -> case resolve resolver queue of
+          Nothing -> BC.putStr $ BC.concat
+            [ BU.toByteString descr
+            , "[warn] Client tried to commit to non-existing queue.\n"
+            ]
+          Just queueIx -> do
+            let r@Rotera{eventRangeVar} = PM.indexSmallArray roteras queueIx
+            Rotera.commit r
+            EventRange _ nextEvent <- STM.readTVarIO eventRangeVar
+            intrVal <- STM.readTVarIO intr
+            PM.writeByteArray respBuf 0
+              (Fixed @'LittleEndian (intrToIdent intrVal))
+            PM.writeByteArray respBuf 1
+              (Fixed @'LittleEndian (fromIntegral nextEvent :: Word64))
+            SMB.send conn (MutableBytes respBuf 0 16) >>= \case
+              Left err -> documentPingSendException descr err
+              Right _ -> handleConnection static (Dynamic msgSizes0 payloadBuf0)
+        Ping queue -> case resolve resolver queue of
+          -- This is very similar to the code for handling Commit.
+          -- Consider refactoring.
+          Nothing -> BC.putStr $ BC.concat
+            [ BU.toByteString descr
+            , "[warn] Client tried to ping non-existing queue.\n"
+            ]
+          Just queueIx -> do
+            let Rotera{eventRangeVar} = PM.indexSmallArray roteras queueIx
+            EventRange _ nextEvent <- STM.readTVarIO eventRangeVar
+            intrVal <- STM.readTVarIO intr
+            PM.writeByteArray respBuf 0
+              (Fixed @'LittleEndian (intrToIdent intrVal))
+            PM.writeByteArray respBuf 1
+              (Fixed @'LittleEndian (fromIntegral nextEvent :: Word64))
+            SMB.send conn (MutableBytes respBuf 0 16) >>= \case
+              Left err -> documentPingSendException descr err
+              Right _ -> handleConnection static (Dynamic msgSizes0 payloadBuf0)
 
 resolve :: PrimArray Word32 -> Word32 -> Maybe Int
 resolve arr w = go (PM.sizeofPrimArray arr - 1) where
@@ -260,7 +356,7 @@ documentPingSendException descr = \case
   SendReset -> printPrefixed descr
     "[warn] Client reset connection while server was responding to ping.\n"
 
--- TODO: really calculate this
+-- TODO: Really calculate this. I think this number is actually correct.
 reqSz :: Int
 reqSz = 32
 
@@ -274,9 +370,13 @@ data Req
       !Word64 -- maximum number of messages
   | ReadStream
       !Word32 -- queue id
+      !Word32 -- maximum messages per chunk
       !Word64 -- first ident
       !Word64 -- exact number of messages
+  | Commit
+      !Word32 -- queue id
   | Ping
+      !Word32 -- queue id
 
 decodeReq :: MutableByteArray RealWorld -> IO (Maybe Req)
 decodeReq arr = do
@@ -286,7 +386,12 @@ decodeReq arr = do
       Fixed queue <- PM.readByteArray arr 2 :: IO (Fixed 'LittleEndian Word32)
       Fixed msgCount <- PM.readByteArray arr 3 :: IO (Fixed 'LittleEndian Word32)
       pure (Just (Push msgCount queue))
-    0x44adba9e22c5cf56 -> pure (Just Ping)
+    0x44adba9e22c5cf56 -> do
+      Fixed queue <- PM.readByteArray arr 2 :: IO (Fixed 'LittleEndian Word32)
+      pure (Just (Ping queue))
+    0xfc54160306bf77d4 -> do
+      Fixed queue <- PM.readByteArray arr 2 :: IO (Fixed 'LittleEndian Word32)
+      pure (Just (Commit queue))
     0x7a23663364b9d865 -> do
       Fixed queue <- PM.readByteArray arr 2 :: IO (Fixed 'LittleEndian Word32)
       Fixed firstIdent <- PM.readByteArray arr 2 :: IO (Fixed 'LittleEndian Word64)
@@ -294,9 +399,10 @@ decodeReq arr = do
       pure (Just (Read queue firstIdent msgCount))
     0xbd4a8ffdc74673dd -> do
       Fixed queue <- PM.readByteArray arr 2 :: IO (Fixed 'LittleEndian Word32)
+      Fixed msgsPerChunk <- PM.readByteArray arr 3 :: IO (Fixed 'LittleEndian Word32)
       Fixed firstIdent <- PM.readByteArray arr 2 :: IO (Fixed 'LittleEndian Word64)
       Fixed msgCount <- PM.readByteArray arr 3 :: IO (Fixed 'LittleEndian Word64)
-      pure (Just (ReadStream queue firstIdent msgCount))
+      pure (Just (ReadStream queue msgsPerChunk firstIdent msgCount))
     _ -> pure Nothing
   
 intrToIdent :: Bool -> Word64
@@ -307,8 +413,8 @@ intrToIdent = \case
 readIdent :: Word64
 readIdent = 0x7a23663364b9d865
 
-readStreamIdent :: Word64
-readStreamIdent = 0xbd4a8ffdc74673dd
+streamIdent :: Word64
+streamIdent = 0xbd4a8ffdc74673dd
 
 pingIdent :: Word64
 pingIdent = 0x44adba9e22c5cf56
@@ -321,3 +427,12 @@ shutdownIdent = 0x024d91a955128d3a
 
 aliveIdent :: Word64
 aliveIdent = 0x6063977ea508edcc
+
+commitIdent :: Word64
+commitIdent = 0xfc54160306bf77d4
+
+vecFoldl :: Prim a => (b -> a -> IO b) -> b -> PV.MVector RealWorld a -> IO b
+vecFoldl f !b0 !v = go 0 b0 where
+  go !ix !b = if ix < PV.length v
+    then (f b =<< PV.unsafeRead v ix) >>= go (ix + 1)
+    else pure b
