@@ -96,7 +96,7 @@ with rec {
        (hself.callPackage expr args)
        (orig: { src = rawPath; })));
 
-    rotera = (hlib.overrideCabal (hself.callC2N {
+    rotera = hlib.overrideCabal (hself.callC2N {
       name = "rotera";
       path = ../.;
       apply = [ hlib.dontCheck ]
@@ -114,8 +114,7 @@ with rec {
       configureFlags = [
         "-f+application"
       ];
-    })).override {
-    };
+    });
 
     byte-order = hself.callC2N {
       name = "byte-order";
