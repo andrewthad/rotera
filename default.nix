@@ -1,3 +1,3 @@
-with (import ./nix/default.nix {});
+{ }:
 
-rotera.out
+(import ./nix/default.nix {}).rotera;
