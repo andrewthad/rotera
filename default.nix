@@ -1,3 +1,3 @@
 { }:
 
-(import ./nix/default.nix {}).rotera;
+(import ./nix/default.nix {}).rotera
