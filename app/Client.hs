@@ -15,7 +15,7 @@ import GHC.Exts (RealWorld)
 import Options.Applicative ((<**>))
 import Rotera.Client (Batch(..),Queue(..),Status(..),Message(..))
 import Socket.Stream.IPv4 (Peer(..))
-import System.IO (stdin,stderr,hPutStrLn)
+import System.IO (stderr,hPutStrLn)
 import System.ByteOrder (Fixed(..))
 import System.Exit (ExitCode(..), exitSuccess)
 import System.Environment (getProgName)
@@ -36,6 +36,7 @@ import qualified Options.Applicative as P
 import qualified Rotera.Client as R
 import qualified Socket.Stream.IPv4 as SCK
 import qualified System.Console.Repline as REP
+import qualified System.IO as IO
 
 main :: IO ()
 main = repl
@@ -55,7 +56,14 @@ run cmd = do
           then putStrLn $ "Next message is " ++ show msgId ++ ". Server is alive."
           else putStrLn $ "Next message is " ++ show msgId ++ ". Server shutting down."
       CommandPush Push{queue,chunk,commit} -> do
-        strs <- fmap (L.filter (not . T.null) . L.map T.strip . T.splitOn (T.singleton '\n')) (TIO.hGetContents stdin)
+        strs <- IO.withFile "/dev/tty" IO.ReadMode $ \h -> do
+          let go !ix ts = if ix < chunk
+                then do
+                  t <- TIO.hGetLine h
+                  go (ix+1) (t:ts)
+                else pure ts
+          strs <- go 0 []
+          pure (L.filter (not . T.null) . L.map T.strip $ strs)
         let bstrs' = L.map TE.encodeUtf8 strs
         forM_ (Split.chunksOf chunk bstrs') $ \bstrs -> do
           let lens = L.map ((fromIntegral :: Int -> Word32) . B.length) bstrs
@@ -303,7 +311,7 @@ optionsList =
 help :: [String] -> Repl ()
 help = const $
   liftIO $ do
-    let failure = P.parserFailure P.defaultPrefs pinfo P.ShowHelpText mempty
+    let failure = P.parserFailure P.defaultPrefs pinfo P.ShowHelpText []
     progn <- getProgName
     let (msg, exit) = P.renderFailure failure progn
     case exit of
