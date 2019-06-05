@@ -66,7 +66,7 @@ import qualified Data.Vector.Primitive.Mutable as PV
 --   |   |   |   |---|---|---|   |   |
 --   +-------------------------------+
 --               | dead zone |
--- 
+--
 -- The resolution table is a map from event identifiers to offsets in
 -- the data section. Although it is logically treated as a map,
 -- it is represented as an array in which the indices are interpretted
@@ -91,6 +91,8 @@ data Settings = Settings
   , settingsExpiredEntries :: !Int
     -- ^ Number of expired entries to keep as a buffer between
     --   the newest entry and old entries.
+  , settingsRotFiles :: FilePath
+    -- ^ Rot file. Ends in *.rot.
   }
 
 open :: String -> IO Rotera
@@ -120,8 +122,8 @@ open path = do
     , writerVar
     }
 
-new :: Settings -> FilePath -> IO Rotera
-new (Settings maxEventBytes0 maximumEvents0 deadZoneEvents0) path = do
+new :: Settings -> IO Rotera
+new (Settings maxEventBytes0 maximumEvents0 deadZoneEvents0 path) = do
   let maxEventBytes = max 4096 (div maxEventBytes0 4096 * 4096)
       maximumEvents = max 1024 (div maximumEvents0 1024 * 1024)
       deadZoneEvents = min (max 2 deadZoneEvents0) (div maximumEvents 2)
@@ -141,9 +143,9 @@ new (Settings maxEventBytes0 maximumEvents0 deadZoneEvents0) path = do
       when (header /= magicHeader) (fail "Rotera.new: magic header was invalid")
       lowestEvent <- PM.readOffAddr base 1
       nextEvent <- PM.readOffAddr base 2
-      PM.writeOffAddr base 3 maxEventBytes 
-      PM.writeOffAddr base 4 maximumEvents 
-      PM.writeOffAddr base 5 deadZoneEvents 
+      PM.writeOffAddr base 3 maxEventBytes
+      PM.writeOffAddr base 4 maximumEvents
+      PM.writeOffAddr base 5 deadZoneEvents
       stagingBuf <- PM.newPrimArray 1 :: IO (MutablePrimArray RealWorld Int)
       PM.writePrimArray stagingBuf 0 nextEvent
       eventRangeVar <- STM.newTVarIO $! EventRange lowestEvent nextEvent
@@ -160,7 +162,7 @@ new (Settings maxEventBytes0 maximumEvents0 deadZoneEvents0) path = do
 magicByteString :: ByteString
 magicByteString =
   BSI.PS (FP.ForeignPtr (unPtr (PM.byteArrayContents y)) (FP.PlainPtr (veryUnsafeThaw y))) 0 (PM.sizeOf (undefined :: Word))
-  where 
+  where
   y = runST $ do
     x <- PM.newPinnedByteArray (PM.sizeOf (undefined :: Word))
     PM.writeByteArray x 0 magicHeader
@@ -184,7 +186,7 @@ debug _ = pure ()
 accomodate ::
      Rotera
   -> Int -- number of events
-  -> Int -- total size of events 
+  -> Int -- total size of events
   -> IO (Int,Int) -- next available event id and the next event data offset
 accomodate !r@Rotera{base,maxEventBytes,maximumEvents,deadZoneEvents,stagingBuf,activeReadersVar,eventRangeVar} events bytes = do
   debug "beginning accomodation"
@@ -327,7 +329,7 @@ pushMany r@Rotera{base,maxEventBytes,maximumEvents,deadZoneEvents,stagingBuf,wri
   where
   MutableBytes src poff plen = payloads
 
--- When this finishes running, the myLock argument is in 
+-- When this finishes running, the myLock argument is in
 -- a WriterLockLocked in the var.
 acquireWriter :: TVar Bool -> TVar WriterLock -> IO ()
 acquireWriter !myLock !var = acquireWriterLoop myLock myLock var
@@ -363,7 +365,7 @@ vecFoldl f !b0 !v = go 0 b0 where
   go !ix !b = if ix < PV.length v
     then (f b =<< PV.unsafeRead v ix) >>= go (ix + 1)
     else pure b
-  
+
 addrToPtr :: Addr -> Ptr a
 addrToPtr (PM.Addr x) = Ptr x
 
@@ -389,7 +391,7 @@ internalCommit Rotera{base,maxEventBytes,maximumEvents,stagingBuf,eventRangeVar}
   when (oldNextEvent /= newNextEvent) $ STM.atomically $ do
     EventRange lowestEvent _ <- STM.readTVar eventRangeVar
     STM.writeTVar eventRangeVar $! EventRange lowestEvent newNextEvent
-    
+
 -- | Push a single event onto the queue. Its persistence is not guaranteed
 --   until 'commit' is called. This function is safe to use concurrently
 --   with itself.
@@ -447,23 +449,23 @@ unPtr (Ptr x) = x
 --     STM.writeTVar root newRoot
 --   Just rootNode@(Node _ rootRight _ _) -> do
 --     rootRightNode@(Node rootRightLeft _ _ _) <- STM.readTVar rootRight
-    
+
 -- data Blockingness = Blocking | Nonblocking
--- 
+--
 -- -- The API I am envisioning for stream-socket communication
 -- data RequestMessages
 --   Uuid -- the queue that should be used
 --   Blockingness -- should the server wait for more events
 --   (Int64 | MostRecent) -- first identifier to start with, use zero for oldest
 --   Word64 -- number of messages, maxBound is effectively infinite
--- 
--- data ResponseMessages = ResponseMessages (ListT IO (MessageId,Messages)) 
--- 
+--
+-- data ResponseMessages = ResponseMessages (ListT IO (MessageId,Messages))
+--
 -- -- There is no response from the server when pushing.
 -- data PushMessages = PushMessages Uuid Messages
--- 
+--
 -- data Commit = Commit Uuid
--- 
+--
 -- data Messages = Messages
 --   PV.Vector Word32 -- sizes of the messages
 --   Bytes -- all the messages concatenated
