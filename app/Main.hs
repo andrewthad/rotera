@@ -45,7 +45,7 @@ run = \case
           Right t -> TIO.putStrLn t
       ) msgs
   CommandCreate s -> do
-    _ <- R.new s defPath
+    _ <- R.new s
     pure ()
   CommandPush -> do
     r <- R.open defPath
@@ -129,6 +129,13 @@ settingsParser = Settings
      <> P.metavar "INT"
      <> P.value 64
      <> P.help "Batch size of expiration"
+      )
+  <*> P.strOption
+      ( P.long "rotfile"
+     <> P.short 'r'
+     <> P.metavar "FILEPATH"
+     <> P.value "0.rot"
+     <> P.help "rot file for use by rotera-server"
       )
 
 lpad :: Int -> [Char] -> [Char]
