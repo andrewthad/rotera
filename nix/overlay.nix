@@ -231,7 +231,7 @@ with rec {
         # by default. Anything other than 1 behind that value results in
         # GHC giving up when attempting to compile `sockets`.
         "--ghc-option=-j1"
-        # "-f+verbose-errors"
+        "-f+verbose-errors"
       ];
     });
 
