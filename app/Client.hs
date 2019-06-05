@@ -6,6 +6,7 @@
 
 import Prelude hiding (Read,id)
 
+import Control.Monad.IO.Class (liftIO)
 import Control.Exception (throwIO)
 import Control.Monad (when,forM_)
 import Data.Primitive (PrimArray,MutablePrimArray,Prim)
@@ -13,9 +14,11 @@ import Data.Word (Word32,Word64)
 import GHC.Exts (RealWorld)
 import Options.Applicative ((<**>))
 import Rotera.Client (Batch(..),Queue(..),Status(..),Message(..))
-import Socket.Stream.IPv4 (Interruptibility(..),Peer(..))
-import System.IO (stdin)
+import Socket.Stream.IPv4 (Peer(..))
+import System.IO (stdin,stderr,hPutStrLn)
 import System.ByteOrder (Fixed(..))
+import System.Exit (ExitCode(..), exitSuccess)
+import System.Environment (getProgName)
 
 import qualified Data.List.Split as Split
 import qualified Data.ByteString as B
@@ -32,13 +35,10 @@ import qualified Net.IPv4 as IPv4
 import qualified Options.Applicative as P
 import qualified Rotera.Client as R
 import qualified Socket.Stream.IPv4 as SCK
+import qualified System.Console.Repline as REP
 
 main :: IO ()
-main = do
-  cmd <- P.execParser $ P.info
-    (commandParser <**> P.helper)
-    P.fullDesc
-  run cmd
+main = repl
 
 run :: Command -> IO ()
 run cmd = do
@@ -264,3 +264,69 @@ thawPrimArray src off len = do
   dst <- PM.newPrimArray len
   PM.copyPrimArray dst 0 src off len
   pure dst
+
+type Repl a = REP.HaskelineT IO a
+
+pinfo :: P.ParserInfo Command
+pinfo = P.info (commandParser <**> P.helper) P.fullDesc
+
+runParser :: [String] -> IO ()
+runParser args = do
+  case P.execParserPure P.defaultPrefs pinfo args of
+    P.Success a -> run a
+    P.Failure failure -> do
+      progn <- getProgName
+      let (msg,exit) = P.renderFailure failure progn
+      case exit of
+        ExitSuccess -> putStrLn msg
+        _ -> hPutStrLn stderr msg
+    P.CompletionInvoked compl -> do
+      progn <- getProgName
+      msg <- P.execCompletion compl progn
+      putStr msg
+
+banner :: Repl String
+banner = pure "> "
+
+initialiser :: Repl ()
+initialiser = liftIO $ putStrLn "Welcome to Rotera Client"
+
+commandF :: String -> Repl ()
+commandF input = liftIO $ runParser (words input)
+
+optionsList :: [(String, [String] -> Repl ())]
+optionsList =
+  [ ("help", help), ("h", help)
+  , ("quit", quit), ("q", quit)
+  ]
+
+help :: [String] -> Repl ()
+help = const $
+  liftIO $ do
+    let failure = P.parserFailure P.defaultPrefs pinfo P.ShowHelpText mempty
+    progn <- getProgName
+    let (msg, exit) = P.renderFailure failure progn
+    case exit of
+      ExitSuccess -> putStrLn msg
+      _ -> hPutStrLn stderr msg
+
+quit :: [String] -> Repl ()
+quit = const $ do
+  liftIO $ do
+    putStrLn "Exiting Rotera Client"
+    exitSuccess
+
+completer :: REP.WordCompleter IO
+completer n = do
+  let cmds = [ "id", "count", "chunk", "print-ids", ":help", ":quit" ]
+  pure $ filter (L.isPrefixOf n) cmds
+
+repl :: IO ()
+repl = REP.evalRepl
+  banner
+  commandF
+  optionsList
+  (Just ':')
+  (REP.Word completer)
+  initialiser
+

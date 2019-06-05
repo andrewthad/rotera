@@ -121,6 +121,7 @@ executable rotera-client
     , optparse-applicative >= 0.14 && < 0.15
     , primitive
     , primitive-unlifted
+    , repline >= 0.2 && < 0.3
     , rotera
     , sockets
     , split >= 0.2 && <0.3
