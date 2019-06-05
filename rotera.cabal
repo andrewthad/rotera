@@ -19,11 +19,6 @@ maintainer: andrew.thaddeus@gmail.com
 category: Database
 extra-source-files:  CHANGELOG.md
 
-flag application
-  manual: True
-  description: Build CLI application that exposes rotera functions as subcommands
-  default: False
-
 library
   exposed-modules:
     Rotera
@@ -87,10 +82,6 @@ executable rotera
     , vector
 
 executable rotera-server
---  if flag(application)
---    buildable: True
---  else
---    buildable: False
   main-is: Server.hs
   default-language: Haskell2010
   hs-source-dirs: app
@@ -104,10 +95,6 @@ executable rotera-server
     , bytestring >= 0.10.8.2 && <0.11
 
 executable rotera-client
---  if flag(application)
---    buildable: True
---  else
---    buildable: False
   main-is: Client.hs
   default-language: Haskell2010
   hs-source-dirs: app
