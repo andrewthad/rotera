@@ -220,8 +220,8 @@ with rec {
       rawPath = super.fetchFromGitHub {
         owner  = "andrewthad";
         repo   = "sockets";
-        rev = "6d39944671daa385ba3e9c8b8cf0d35ad82b0e2e";
-        sha256 = "1x8lb50wps1mibvf0m0fsvcgnnfp0lh4ri7s766pbg35n67yy0jq";
+        rev = "a8056a390a5657a563e272e2dead859fc9a4ee15";
+        sha256 = "0bk5vbcglcjkpw30rsd3iaj7zp2lrqp13q4v1m8d55wmsnmp202d";
       };
       apply = [ hlib.dontHaddock ];
     }) (old : {

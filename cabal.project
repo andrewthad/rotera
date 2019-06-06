@@ -18,7 +18,7 @@ source-repository-package
 source-repository-package
   type: git
   location: https://github.com/andrewthad/sockets
-  tag: 6d39944671daa385ba3e9c8b8cf0d35ad82b0e2e
+  tag: a8056a390a5657a563e272e2dead859fc9a4ee15
 source-repository-package
   type: git
   location: https://github.com/andrewthad/primitive-offset
