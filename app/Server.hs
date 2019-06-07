@@ -20,9 +20,14 @@ import qualified Rotera as Rotera
 import qualified Rotera.Socket as R
 import qualified Control.Concurrent.STM as STM
 import qualified GHC.OldList as L
+import qualified Foreign.Storable as S
+import qualified Control.Exception as E
 
 main :: IO ()
 main = do
+  when (S.sizeOf (undefined :: Int) /= 8) $ do
+    E.throwIO (E.AssertionFailed "Not on a 64-bit platform.")
+
   !intr <- STM.newTVarIO False
   !done <- newEmptyMVar :: IO (MVar ())
   paths <- listDirectory "."
