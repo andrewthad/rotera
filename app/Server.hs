@@ -4,27 +4,32 @@
 {-# language NamedFieldPuns #-}
 {-# language OverloadedStrings #-}
 
-import Control.Exception
 import Control.Concurrent (forkIO)
 import Control.Concurrent.MVar (MVar,takeMVar,putMVar)
 import Control.Concurrent.MVar (newEmptyMVar)
-import Data.Word (Word32)
-import Text.Read (readMaybe)
-import System.Directory (listDirectory)
+import Control.Exception
 import Control.Monad (when)
+import Data.Word (Word16, Word32)
 import Rotera (Rotera(..))
+import System.Directory (listDirectory)
+import Text.Read (readMaybe)
+
+import qualified Control.Concurrent.STM as STM
+import qualified Control.Exception as E
 import qualified Data.ByteString.Char8 as BC
 import qualified Data.Text as T
+import qualified Foreign.Storable as S
 import qualified GHC.Exts as E
+import qualified Options.Applicative as P
 import qualified Rotera as Rotera
 import qualified Rotera.Socket as R
-import qualified Control.Concurrent.STM as STM
-import qualified GHC.OldList as L
-import qualified Foreign.Storable as S
-import qualified Control.Exception as E
 
 main :: IO ()
 main = do
+  port <- P.execParser $ P.info
+    (portParser P.<**> P.helper)
+    P.fullDesc
+
   when (S.sizeOf (undefined :: Int) /= 8) $ do
     E.throwIO (E.AssertionFailed "Not on a 64-bit platform.")
 
@@ -73,7 +78,7 @@ main = do
   let resolver = E.fromList (map fst xs)
   let roteras = E.fromList (map snd xs)
   _ <- forkIO $ do
-    R.server intr resolver roteras
+    R.server port intr resolver roteras
     putMVar done ()
   catch
     (takeMVar done)
@@ -83,3 +88,14 @@ main = do
         takeMVar done
       e -> throwIO e
     )
+
+portParser :: P.Parser Word16
+portParser = P.option P.auto
+  ( P.long "port"
+ <> P.short 'p'
+ <> P.metavar "WORD16"
+ <> P.value 8245
+ <> P.showDefault
+ <> P.help "Port where rotera-server is running"
+  )
+
