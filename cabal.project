@@ -27,3 +27,7 @@ source-repository-package
   type: git
   location: https://github.com/andrewthad/posix-api
   tag: 64c591d71fca86a58c04e15b187d5580021bebc4
+source-repository-package
+  type: git
+  location: https://github.com/haskell-primitive/primitive-checked
+  tag: d136c5223be331c21c51769eb0be0c85bc6feee6
