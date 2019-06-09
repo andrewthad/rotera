@@ -25,7 +25,6 @@ import GHC.Exts (RealWorld)
 
 import qualified Control.Concurrent.STM as STM
 import qualified Data.Primitive as PM
-import qualified Data.Primitive.PrimArray.Atomic as PM
 
 -- | A persisted rotating queue that removes the oldest entries as new
 --   entries come in.
@@ -136,14 +135,14 @@ snocSmallArray x arr = runST $ do
 -- that the slot is empty. The sz argument should be equal to the size
 -- of the old event id array. The new event id array should have a size
 -- one greater than this. It will often be resized by this function.
-assignEvent ::
+_assignEvent ::
      MutablePrimArray s Int
   -> SmallArray (TVar Bool)
   -> PrimArray Int
   -> TVar Bool
   -> Int -- event identifier
   -> ST s (PrimArray Int,SmallArray (TVar Bool),TVar Bool)
-assignEvent !new !stopBlock !old !extraStop !eventId = go 0
+_assignEvent !new !stopBlock !old !extraStop !eventId = go 0
   where
   !sz = PM.sizeofSmallArray stopBlock
   go !ix = if ix < sz
