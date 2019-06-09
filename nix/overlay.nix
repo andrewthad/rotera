@@ -160,6 +160,17 @@ with rec {
       apply = [ hlib.dontCheck ];
     };
 
+    primitive-checked = hself.callC2N {
+      name = "primitive-checked";
+      rawPath = super.fetchFromGitHub {
+        owner  = "haskell-primitive";
+        repo   = "primitive-checked";
+        rev = "d136c5223be331c21c51769eb0be0c85bc6feee6";
+        sha256 = "179knm68zl0ajj744j7g8n8fxd6gjwmv5128xmh9ci7hg6diwarm";
+      };
+      apply = [ hlib.dontCheck ];
+    };
+
     primitive-addr = hself.callC2N {
       name = "primitive-addr";
       rawPath = super.fetchFromGitHub {
@@ -212,17 +223,6 @@ with rec {
         "-f+verbose-errors"
       ];
     });
-
-    primitive-checked = hself.callC2N {
-      name = "primitive-checked";
-      rawPath = super.fetchFromGitHub {
-        owner = "haskell-primitive";
-        repo = "primitive-checked";
-        rev = "9f9dab4b9f193b4c1f5a8ab31d6a9990980723e7";
-        sha256 = "07f4ij5rx8z8yk7mppgspcdg27phx7vgcbcrl7fbygl4z6mc8r96";
-      };
-      apply = [ ];
-    };
 
     posix-api = hself.callC2N {
       name = "posix-api";
