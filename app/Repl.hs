@@ -5,16 +5,15 @@
 {-# language DuplicateRecordFields #-}
 {-# language TypeApplications #-}
 
-import Control.Exception (throwIO)
 import Control.Monad.IO.Class (liftIO)
 import Data.IORef
 import Data.Word (Word16, Word32, Word64)
 import Prelude hiding (read)
-import Rotera.Client (Queue(..),Batch(..),Queue(..),Status(..))
+import Rotera.Client (RoteraException,Queue(..),Batch(..),Status(..))
 import Socket.Stream.IPv4 (Peer(..))
 import System.ByteOrder (Fixed(..))
 import System.Console.Repline
-import System.Exit (exitSuccess)
+import System.Exit (exitSuccess,exitFailure)
 import System.IO.Unsafe (unsafePerformIO)
 import Text.Read (readMaybe)
 
@@ -61,12 +60,18 @@ run p = do
   e <- SCK.withConnection
     Peer{address=IPv4.loopback,port=p}
     (\e () -> case e of
-      Left err -> throwIO err
+      Left err -> do
+        putStr $ "Unable to establish connection to rotera-server.\n"
+        putStr $ "Error was: " <> show err <> "\n"
+        exitFailure
       Right () -> pure ()
     )
     repl
   case e of
-    Left err -> throwIO err
+    Left err -> do
+      putStr $ "Failure when executing repl.\n"
+      putStr $ "Error was: " <> show err <> "\n"
+      exitFailure
     Right () -> pure ()
 
 repl :: SCK.Connection -> IO ()
@@ -94,7 +99,7 @@ completer n = do
         , "help"
         , "quit"
         ]
-  pure $ L.filter (L.isPrefixOf n) names
+  pure $ L.filter (L.isPrefixOf n) (names ++ map (':' :) names)
 
 helpStr :: String
 helpStr = mconcat
@@ -195,7 +200,8 @@ current _ = liftIO $ putStr (mal "current")
 ping :: SCK.Connection -> [String] -> Repl ()
 ping conn [] = liftIO $ do
   readIORef queueRef >>= R.ping conn >>= \case
-    Left err -> throwIO err
+    Left err -> do
+      putStr $ errPing err
     Right R.Status{alive,next=R.Message msgId} -> if alive
       then putStr $ "Next message is " ++ show msgId ++ ". Server is alive.\n"
       else putStr $ "Next message is " ++ show msgId ++ ". Server shutting down.\n"
@@ -212,7 +218,9 @@ push conn (x:_) = liftIO $ do
   currentQueue <- readIORef queueRef
   e <- R.push conn currentQueue msgCount (B.length bstr) msgLens mbstr
   case e of
-    Left err -> throwIO err
+    Left err -> do
+      putStr $ "Unable to push message to rotera-server.\n"
+      putStr $ "Error was: " <> show err
     Right () -> do
       () <$ R.commit conn currentQueue
 push _ _ = liftIO $ putStr (mal "push")
@@ -225,18 +233,22 @@ readBatch conn (x:_) = liftIO $ do
       currentQueue <- readIORef queueRef
       currentPrintIds <- readIORef printIdsRef
       R.ping conn currentQueue >>= \case
-        Left err -> throwIO err
+        Left err -> do
+          putStr $ errPing err
         Right R.Status{next} -> do
-          Batch{start,messages} <- either throwIO pure
-            =<< R.read conn currentQueue next b
-          flip PM.itraverseUnliftedArray_ messages $ \ix msg -> do
-            let prefix = if currentPrintIds == On
-                  then T.pack (lpad 11 (show (R.getMessage start + fromIntegral ix)) ++ " ")
-                  else T.empty
-            TIO.putStr prefix
-            case TE.decodeUtf8' (BU.toByteString msg) of
-              Left _ -> TIO.putStr "<non-utf8>\n"
-              Right t -> TIO.putStrLn t
+          R.read conn currentQueue next b >>= \case
+            Left err -> do
+              putStr $ errRead err
+            Right Batch{start,messages} -> do
+              flip PM.itraverseUnliftedArray_ messages $ \ix msg -> do
+                let prefix = if currentPrintIds == On
+                      then T.pack (lpad 11 (show (R.getMessage start + fromIntegral ix)) ++ " ")
+                      else T.empty
+                TIO.putStr prefix
+                case TE.decodeUtf8' (BU.toByteString msg) of
+                  Left _ -> do
+                    putStr $ errNonUtf8
+                  Right t -> TIO.putStrLn t
 readBatch _ _ = liftIO $ putStr (mal "read-batch")
 
 read :: SCK.Connection -> [String] -> Repl ()
@@ -245,19 +257,33 @@ read conn [] = liftIO $ do
   currentQueue <- readIORef queueRef
   currentPrintIds <- readIORef printIdsRef
   R.ping conn currentQueue >>= \case
-    Left err -> throwIO err
+    Left err -> do
+      putStr $ errPing err
     Right R.Status{next} -> do
-      Batch{start,messages} <- either throwIO pure
-        =<< R.read conn currentQueue next b
-      flip PM.itraverseUnliftedArray_ messages $ \ix msg -> do
-        let prefix = if currentPrintIds == On
-              then T.pack (lpad 11 (show (R.getMessage start + fromIntegral ix)) ++ " ")
-              else T.empty
-        TIO.putStr prefix
-        case TE.decodeUtf8' (BU.toByteString msg) of
-          Left _ -> TIO.putStr "<non-utf8>\n"
-          Right t -> TIO.putStrLn t
+      R.read conn currentQueue next b >>= \case
+        Left err -> do
+          putStr $ errRead err
+        Right Batch{start,messages} -> do
+          flip PM.itraverseUnliftedArray_ messages $ \ix msg -> do
+            let prefix = if currentPrintIds == On
+                  then T.pack (lpad 11 (show (R.getMessage start + fromIntegral ix)) ++ " ")
+                  else T.empty
+            TIO.putStr prefix
+            case TE.decodeUtf8' (BU.toByteString msg) of
+              Left _ -> do
+                putStr $ errNonUtf8
+              Right t -> TIO.putStrLn t
 read _ _ = liftIO $ putStr (mal "read")
+
+errNonUtf8 :: String
+errNonUtf8 = "Encountered non-UTF-8 text when reading from rotera-server.\n"
+errPing :: RoteraException -> String
+errPing err = "The server is unreachable.\n"
+  <> "Socket error: " <> show err <> "\n"
+
+errRead :: RoteraException -> String
+errRead err = "Cannot read batch.\n"
+  <> "Error was: " <> show err <> "\n"
 
 portParser :: P.Parser Word16
 portParser = P.option P.auto
