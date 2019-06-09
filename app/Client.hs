@@ -119,10 +119,6 @@ optsParser = Opts
   <$> portParser
   <*> commandParser
 
-newtype Port = Port
-  { port :: Word16
-  }
-
 data Command
   = CommandPing !Ping
   | CommandRead !Read
