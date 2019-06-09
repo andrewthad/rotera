@@ -20,6 +20,7 @@ module Rotera.Client
   , Message(..)
   , Batch(..)
   , Status(..)
+  , RoteraException(..)
   ) where
 
 import Prelude hiding (read)
