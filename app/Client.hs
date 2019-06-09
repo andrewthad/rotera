@@ -9,11 +9,11 @@ import Prelude hiding (Read,id)
 import Control.Exception (throwIO)
 import Control.Monad (when,forM_)
 import Data.Primitive (PrimArray,MutablePrimArray,Prim)
-import Data.Word (Word32,Word64)
+import Data.Word (Word16,Word32,Word64)
 import GHC.Exts (RealWorld)
 import Options.Applicative ((<**>))
 import Rotera.Client (Batch(..),Queue(..),Status(..),Message(..))
-import Socket.Stream.IPv4 (Interruptibility(..),Peer(..))
+import Socket.Stream.IPv4 (Peer(..))
 import System.IO (stdin)
 import System.ByteOrder (Fixed(..))
 
@@ -35,15 +35,15 @@ import qualified Socket.Stream.IPv4 as SCK
 
 main :: IO ()
 main = do
-  cmd <- P.execParser $ P.info
-    (commandParser <**> P.helper)
+  o <- P.execParser $ P.info
+    (optsParser <**> P.helper)
     P.fullDesc
-  run cmd
+  run o
 
-run :: Command -> IO ()
-run cmd = do
+run :: Opts -> IO ()
+run Opts{port=p,command=cmd} = do
   e <- SCK.withConnection
-    Peer{address=IPv4.loopback,port=8245}
+    Peer{address=IPv4.loopback,port=p}
     (\e () -> case e of
       Left err -> throwIO err
       Right () -> pure ()
@@ -108,6 +108,20 @@ run cmd = do
   case e of
     Left err -> throwIO err
     Right () -> pure ()
+
+data Opts = Opts
+  { port :: Word16
+  , command :: Command
+  }
+
+optsParser :: P.Parser Opts
+optsParser = Opts
+  <$> portParser
+  <*> commandParser
+
+newtype Port = Port
+  { port :: Word16
+  }
 
 data Command
   = CommandPing !Ping
@@ -253,6 +267,16 @@ streamParser = Stream
      <> P.help "Queue identifier"
       )
       )
+
+portParser :: P.Parser Word16
+portParser = P.option P.auto
+  ( P.long "port"
+ <> P.short 'p'
+ <> P.metavar "WORD16"
+ <> P.value 8245
+ <> P.showDefault
+ <> P.help "Port where rotera-server is running"
+  )
 
 lpad :: Int -> [Char] -> [Char]
 lpad m xs = L.replicate (m - length ys) '0' ++ ys

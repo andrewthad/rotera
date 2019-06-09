@@ -8,7 +8,7 @@
 import Control.Exception (throwIO)
 import Control.Monad.IO.Class (liftIO)
 import Data.IORef
-import Data.Word (Word32, Word64)
+import Data.Word (Word16, Word32, Word64)
 import Prelude hiding (read)
 import Rotera.Client (Queue(..),Batch(..),Queue(..),Status(..))
 import Socket.Stream.IPv4 (Peer(..))
@@ -29,6 +29,7 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import qualified Data.Text.IO as TIO
 import qualified GHC.OldList as L
+import qualified Options.Applicative as P
 import qualified Net.IPv4 as IPv4
 import qualified Rotera.Client as R
 import qualified Socket.Stream.IPv4 as SCK
@@ -50,8 +51,15 @@ batchRef = unsafePerformIO $ newIORef 0
 
 main :: IO ()
 main = do
+  port <- P.execParser $ P.info
+    (portParser P.<**> P.helper)
+    P.fullDesc
+  run port
+
+run :: Word16 -> IO ()
+run p = do
   e <- SCK.withConnection
-    Peer{address=IPv4.loopback,port=8245}
+    Peer{address=IPv4.loopback,port=p}
     (\e () -> case e of
       Left err -> throwIO err
       Right () -> pure ()
@@ -250,6 +258,16 @@ read conn [] = liftIO $ do
           Left _ -> TIO.putStr "<non-utf8>\n"
           Right t -> TIO.putStrLn t
 read _ _ = liftIO $ putStr (mal "read")
+
+portParser :: P.Parser Word16
+portParser = P.option P.auto
+  ( P.long "port"
+ <> P.short 'p'
+ <> P.metavar "WORD16"
+ <> P.value 8245
+ <> P.showDefault
+ <> P.help "Port where rotera-server is running"
+  )
 
 lpad :: Int -> [Char] -> [Char]
 lpad m xs = L.replicate (m - length ys) '0' ++ ys
