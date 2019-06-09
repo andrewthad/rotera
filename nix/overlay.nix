@@ -58,6 +58,7 @@ with rec {
                [ (beginsWith ".ghc") ]
                [ (hasExtension ".sh") ]
                [ (hasExtension ".txt") ]
+               [ (hasExtension ".project") ]
              ]);
            src = lib.cleanSource path;
          }
