@@ -193,28 +193,6 @@ with rec {
       apply = [ hlib.dontCheck ];
     };
 
-    teleshell = hself.callC2N {
-      name = "teleshell";
-      rawPath = super.fetchFromGitHub {
-        owner  = "andrewthad";
-        repo   = "teleshell";
-        rev    = "b849195fc80e6d14f6482808e3359e310ceab037";
-        sha256 = "0l56whaf7ykw009rxkz4b19np4h52kbmjr88rl9c8yzvjrmy1hyx";
-      };
-      apply = [ ];
-    };
-
-    bytestring-substring = hself.callC2N {
-      name = "bytestring-substring";
-      rawPath = super.fetchFromGitHub {
-        owner  = "chessai";
-        repo   = "bytestring-substring";
-        rev    = "8d2be32803c1c150f4586df4d6ca52f46d67f270";
-        sha256 = "0hisns06syvp6lcgpkbrffmibglvqxsq71izddjsan1b2hkwd9yw";
-      };
-      apply = [ hlib.doJailbreak ];
-    };
-
     sockets = hlib.overrideCabal (hself.callC2N {
       name = "sockets";
       rawPath = super.fetchFromGitHub {
@@ -234,6 +212,17 @@ with rec {
         "-f+verbose-errors"
       ];
     });
+
+    primitive-checked = hself.callC2N {
+      name = "primitive-checked";
+      rawPath = super.fetchFromGitHub {
+        owner = "haskell-primitive";
+        repo = "primitive-checked";
+        rev = "9f9dab4b9f193b4c1f5a8ab31d6a9990980723e7";
+        sha256 = "07f4ij5rx8z8yk7mppgspcdg27phx7vgcbcrl7fbygl4z6mc8r96";
+      };
+      apply = [ ];
+    };
 
     posix-api = hself.callC2N {
       name = "posix-api";
