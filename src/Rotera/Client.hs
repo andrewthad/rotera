@@ -128,7 +128,7 @@ read ::
      Connection -- ^ Connection to rotera server
   -> Queue -- ^ Queue to read from
   -> Message -- ^ Earliest message key
-  -> Word64 -- ^ Number of messages
+  -> Word32 -- ^ Number of messages
   -> IO (Either RoteraException Batch)
 read conn (Queue queue) (Message firstIdentW) reqCountW = do
   buf <- PM.newByteArray reqSz
@@ -136,10 +136,10 @@ read conn (Queue queue) (Message firstIdentW) reqCountW = do
     (Fixed @'LittleEndian readIdent)
   PM.writeByteArray buf 2
     (Fixed @'LittleEndian queue)
-  PM.writeByteArray buf 2
-    (Fixed @'LittleEndian firstIdentW)
   PM.writeByteArray buf 3
     (Fixed @'LittleEndian reqCountW)
+  PM.writeByteArray buf 2
+    (Fixed @'LittleEndian firstIdentW)
   SMB.send conn (MutableBytes buf 0 reqSz) >>= \case
     Left err -> pure (Left (RoteraExceptionSend err))
     Right (_ :: ()) -> receiveBatch conn buf

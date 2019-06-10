@@ -61,6 +61,10 @@ data Dynamic = Dynamic
   -- for concurrent ingest
   !(MutableByteArray RealWorld)
 
+-- Sanity checks:
+-- * Reject pushes with more than 2^20 messages
+-- * Cap reads at 2^18 messages
+-- * Cap stream batch sizes at 2^18 messages
 server ::
      TVar Bool
      -- ^ Interrupt. When this becomes @True@, stop accepting
@@ -165,39 +169,52 @@ handleConnection static@(Static intr conn descr reqBuf respBuf resolver roteras)
         , "[warn] Client sent an invalid request.\n"
         ]
       Just req -> case req of
-        Push msgCountW queue -> case resolve resolver queue of
-          Nothing -> BC.putStr $ BC.concat
-            [ BU.toByteString descr
-            , "[warn] Client tried to push to non-existing queue.\n"
-            ]
-          Just queueIx -> do
-            let msgCount = fromIntegral msgCountW :: Int
-            let r = PM.indexSmallArray roteras queueIx
-            msgSizes1 <- ensureCapacity msgSizes0 (msgCount * 4)
-            SMB.receiveExactly conn (MutableBytes msgSizes1 0 (msgCount * 4)) >>= \case
-              Left err -> documentExceptionPush descr err
-              Right (_ :: ()) -> do
-                -- TODO: Attempt to load the payload directly into
-                -- the mmapped region.
-                let msgSzVec :: PV.MVector RealWorld (Fixed 'LittleEndian Word32)
-                    msgSzVec = PV.MVector 0 msgCount msgSizes1 
-                payloadSz <- vecFoldl
-                  (\x y -> pure (x + fromIntegral y))
-                  (0 :: Int)
-                  msgSzVec
-                payloadBuf1 <- ensureCapacity payloadBuf0 payloadSz
-                SMB.receiveExactly conn (MutableBytes payloadBuf1 0 payloadSz) >>= \case
-                  Left err -> documentExceptionPush descr err
-                  Right (_ :: ()) -> do
-                    Rotera.pushMany r msgSzVec
-                      (MutableBytes payloadBuf1 0 payloadSz)
-                    handleConnection static (Dynamic msgSizes1 payloadBuf1)
-        Read queue firstIdentW msgCountW -> case resolve resolver queue of
+        Push msgCountW queue -> if msgCountW > 1048576
+          then BC.putStr $ BC.concat
+              [ BU.toByteString descr
+              , "[warn] Client tried to push more than 1048576 messages.\n"
+              ]
+          else case resolve resolver queue of
+            Nothing -> BC.putStr $ BC.concat
+              [ BU.toByteString descr
+              , "[warn] Client tried to push to non-existing queue.\n"
+              ]
+            Just queueIx -> do
+              let msgCount = fromIntegral msgCountW :: Int
+              let r = PM.indexSmallArray roteras queueIx
+              msgSizes1 <- ensureCapacity msgSizes0 (msgCount * 4)
+              SMB.receiveExactly conn (MutableBytes msgSizes1 0 (msgCount * 4)) >>= \case
+                Left err -> documentExceptionPush descr err
+                Right (_ :: ()) -> do
+                  -- TODO: Attempt to load the payload directly into
+                  -- the mmapped region.
+                  let msgSzVec :: PV.MVector RealWorld (Fixed 'LittleEndian Word32)
+                      msgSzVec = PV.MVector 0 msgCount msgSizes1 
+                  payloadSz <- vecFoldl
+                    (\x y -> pure (x + fromIntegral y))
+                    (0 :: Int)
+                    msgSzVec
+                  payloadBuf1 <- ensureCapacity payloadBuf0 payloadSz
+                  SMB.receiveExactly conn (MutableBytes payloadBuf1 0 payloadSz) >>= \case
+                    Left err -> documentExceptionPush descr err
+                    Right (_ :: ()) -> do
+                      Rotera.pushMany r msgSzVec
+                        (MutableBytes payloadBuf1 0 payloadSz)
+                      handleConnection static (Dynamic msgSizes1 payloadBuf1)
+        Read queue msgCountUncroppedW firstIdentW -> case resolve resolver queue of
           Nothing -> BC.putStr $ BC.concat
             [ BU.toByteString descr
             , "[warn] Client tried to read from non-existing queue.\n"
             ]
           Just queueIx -> do
+            msgCountW <- if msgCountUncroppedW > 262144
+              then do
+                BC.putStr $ BC.concat
+                  [ BU.toByteString descr
+                  , "[warn] Cropping large read.\n"
+                  ]
+                pure 262144
+              else pure msgCountUncroppedW
             BC.putStr $ BC.concat
               [ BU.toByteString descr
               , "[debug] Reading up to "
@@ -223,12 +240,20 @@ handleConnection static@(Static intr conn descr reqBuf respBuf resolver roteras)
                   , " messages.\n"
                   ]
                 handleConnection static (Dynamic msgSizes1 payloadBuf0)
-        ReadStream queue msgsPerChunkW firstIdentW msgCountW -> case resolve resolver queue of
+        ReadStream queue msgsPerChunkUncroppedW firstIdentW msgCountW -> case resolve resolver queue of
           Nothing -> BC.putStr $ BC.concat
             [ BU.toByteString descr
             , "[warn] Client tried to read from non-existing queue.\n"
             ]
           Just queueIx -> do
+            msgsPerChunkW <- if msgsPerChunkUncroppedW > 262144
+              then do
+                BC.putStr $ BC.concat
+                  [ BU.toByteString descr
+                  , "[warn] Cropping large read.\n"
+                  ]
+                pure 262144
+              else pure msgsPerChunkUncroppedW
             BC.putStr $ BC.concat
               [ BU.toByteString descr
               , "[debug] Streaming up to "
@@ -366,8 +391,8 @@ data Req
       !Word32 -- number of messages
   | Read
       !Word32 -- queue id
+      !Word32 -- maximum number of messages
       !Word64 -- first ident
-      !Word64 -- maximum number of messages
   | ReadStream
       !Word32 -- queue id
       !Word32 -- maximum messages per chunk
@@ -394,9 +419,9 @@ decodeReq arr = do
       pure (Just (Commit queue))
     0x7a23663364b9d865 -> do
       Fixed queue <- PM.readByteArray arr 2 :: IO (Fixed 'LittleEndian Word32)
+      Fixed msgCount <- PM.readByteArray arr 3 :: IO (Fixed 'LittleEndian Word32)
       Fixed firstIdent <- PM.readByteArray arr 2 :: IO (Fixed 'LittleEndian Word64)
-      Fixed msgCount <- PM.readByteArray arr 3 :: IO (Fixed 'LittleEndian Word64)
-      pure (Just (Read queue firstIdent msgCount))
+      pure (Just (Read queue msgCount firstIdent))
     0xbd4a8ffdc74673dd -> do
       Fixed queue <- PM.readByteArray arr 2 :: IO (Fixed 'LittleEndian Word32)
       Fixed msgsPerChunk <- PM.readByteArray arr 3 :: IO (Fixed 'LittleEndian Word32)

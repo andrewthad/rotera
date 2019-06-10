@@ -8,7 +8,7 @@
 import Control.Exception (throwIO)
 import Control.Monad.IO.Class (liftIO)
 import Data.IORef
-import Data.Word (Word32, Word64)
+import Data.Word (Word32)
 import Prelude hiding (read)
 import Rotera.Client (Queue(..),Batch(..),Queue(..),Status(..))
 import Socket.Stream.IPv4 (Peer(..))
@@ -44,7 +44,7 @@ printIdsRef :: IORef OnOff
 printIdsRef = unsafePerformIO $ newIORef On
 {-# noinline printIdsRef #-}
 
-batchRef :: IORef Word64
+batchRef :: IORef Word32
 batchRef = unsafePerformIO $ newIORef 0
 {-# noinline batchRef #-}
 
@@ -158,7 +158,7 @@ printIds xs = liftIO $ go xs where
 batch :: [String] -> Repl ()
 batch xs = liftIO $ go xs where
   go (x:[]) = do
-    case readMaybe @Word64 x of
+    case readMaybe @Word32 x of
       Nothing -> do
         putStr (mal "batch")
       Just newBatch -> do
@@ -211,7 +211,7 @@ push _ _ = liftIO $ putStr (mal "push")
 
 readBatch :: SCK.Connection -> [String] -> Repl ()
 readBatch conn (x:_) = liftIO $ do
-  case readMaybe @Word64 x of
+  case readMaybe @Word32 x of
     Nothing -> putStr (mal "read-batch")
     Just b -> do
       currentQueue <- readIORef queueRef

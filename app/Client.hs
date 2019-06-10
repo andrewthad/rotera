@@ -127,7 +127,7 @@ data Push = Push
 
 data Read = Read
   { id :: !Message
-  , count :: !Word64
+  , count :: !Word32
   , printIds :: !Bool
   , queue :: !Queue
   }
