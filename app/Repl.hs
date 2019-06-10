@@ -277,6 +277,7 @@ read _ _ = liftIO $ putStr (mal "read")
 
 errNonUtf8 :: String
 errNonUtf8 = "Encountered non-UTF-8 text when reading from rotera-server.\n"
+
 errPing :: RoteraException -> String
 errPing err = "The server is unreachable.\n"
   <> "Socket error: " <> show err <> "\n"
@@ -289,7 +290,7 @@ portParser :: P.Parser Word16
 portParser = P.option P.auto
   ( P.long "port"
  <> P.short 'p'
- <> P.metavar "WORD16"
+ <> P.metavar "PORT"
  <> P.value 8245
  <> P.showDefault
  <> P.help "Port where rotera-server is running"
