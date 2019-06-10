@@ -1,8 +1,8 @@
 {-# language BangPatterns #-}
-{-# language NamedFieldPuns #-}
-{-# language LambdaCase #-}
-{-# language OverloadedStrings #-}
 {-# language DuplicateRecordFields #-}
+{-# language LambdaCase #-}
+{-# language NamedFieldPuns #-}
+{-# language OverloadedStrings #-}
 {-# language TypeApplications #-}
 
 import Control.Monad.IO.Class (liftIO)
@@ -19,17 +19,15 @@ import Text.Read (readMaybe)
 
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Char8 as BC8
+import qualified Data.ByteString.Encodings as BE
 import qualified Data.Bytes.Mutable.Unsliced as MB
 import qualified Data.Bytes.Unsliced as BU
 import qualified Data.Char as Char
 import qualified Data.Primitive.Contiguous as C
 import qualified Data.Primitive.Unlifted.Array as PM
-import qualified Data.Text as T
-import qualified Data.Text.Encoding as TE
-import qualified Data.Text.IO as TIO
 import qualified GHC.OldList as L
-import qualified Options.Applicative as P
 import qualified Net.IPv4 as IPv4
+import qualified Options.Applicative as P
 import qualified Rotera.Client as R
 import qualified Socket.Stream.IPv4 as SCK
 
@@ -242,13 +240,13 @@ readBatch conn (x:_) = liftIO $ do
             Right Batch{start,messages} -> do
               flip PM.itraverseUnliftedArray_ messages $ \ix msg -> do
                 let prefix = if currentPrintIds == On
-                      then T.pack (lpad 11 (show (R.getMessage start + fromIntegral ix)) ++ " ")
-                      else T.empty
-                TIO.putStr prefix
-                case TE.decodeUtf8' (BU.toByteString msg) of
-                  Left _ -> do
-                    putStr $ errNonUtf8
-                  Right t -> TIO.putStrLn t
+                      then lpad 11 (show (R.getMessage start + fromIntegral ix)) ++ " "
+                      else ""
+                putStr prefix
+                let msg' = BU.toByteString msg
+                if BE.isUtf8 msg'
+                  then B.putStrLn msg
+                  else putStr errNonUtf8
 readBatch _ _ = liftIO $ putStr (mal "read-batch")
 
 read :: SCK.Connection -> [String] -> Repl ()
@@ -266,17 +264,18 @@ read conn [] = liftIO $ do
         Right Batch{start,messages} -> do
           flip PM.itraverseUnliftedArray_ messages $ \ix msg -> do
             let prefix = if currentPrintIds == On
-                  then T.pack (lpad 11 (show (R.getMessage start + fromIntegral ix)) ++ " ")
-                  else T.empty
-            TIO.putStr prefix
-            case TE.decodeUtf8' (BU.toByteString msg) of
-              Left _ -> do
-                putStr $ errNonUtf8
-              Right t -> TIO.putStrLn t
+                  then lpad 11 (show (R.getMessage start + fromIntegral ix)) ++ " "
+                  else ""
+            putStr prefix
+            let msg' = BU.toByteString msg
+            if BE.isUtf8 msg'
+              then B.putStrLn msg
+              else putStr errNonUtf8
 read _ _ = liftIO $ putStr (mal "read")
 
 errNonUtf8 :: String
 errNonUtf8 = "Encountered non-UTF-8 text when reading from rotera-server.\n"
+
 errPing :: RoteraException -> String
 errPing err = "The server is unreachable.\n"
   <> "Socket error: " <> show err <> "\n"
@@ -289,7 +288,7 @@ portParser :: P.Parser Word16
 portParser = P.option P.auto
   ( P.long "port"
  <> P.short 'p'
- <> P.metavar "WORD16"
+ <> P.metavar "PORT"
  <> P.value 8245
  <> P.showDefault
  <> P.help "Port where rotera-server is running"

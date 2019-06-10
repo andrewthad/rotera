@@ -186,7 +186,7 @@ with rec {
     primitive-offset = hself.callC2N {
       name = "primitive-offset";
       rawPath = super.fetchFromGitHub {
-        owner  = "andrewthad";
+        owner  = "haskell-primitive";
         repo   = "primitive-offset";
         rev = "dfc7b35285731b8589023abf398d45cdcf9138ab";
         sha256 = "0jfn42xav31zs9yd5841qy76qrc25cbx6lpgfh5av3v6dsxyrxb7";
