@@ -108,7 +108,7 @@ server p intr resolver roteras = do
                   , "[info] Established connection.\n"
                   ]
                 reqBufStatic <- PM.newByteArray reqSz
-                respBuf <- PM.newByteArray 8
+                respBuf <- PM.newByteArray 16
                 let static = Static
                       intr conn descr reqBufStatic respBuf resolver roteras
                 -- No real reason for the reqBuf to start at 64 bytes.
