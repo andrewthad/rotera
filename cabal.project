@@ -1,4 +1,4 @@
-packages: . ../sockets ../primitive-checked
+packages: .
 source-repository-package
   type: git
   location: https://github.com/andrewthad/byte-order
@@ -27,3 +27,7 @@ source-repository-package
   type: git
   location: https://github.com/haskell-primitive/primitive-checked
   tag: d136c5223be331c21c51769eb0be0c85bc6feee6
+source-repository-package
+  type: git
+  location: https://github.com/andrewthad/sockets
+  tag: 568552b58e62652456f5db2a01967774167e846b
