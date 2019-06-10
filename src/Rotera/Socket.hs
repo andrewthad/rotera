@@ -13,10 +13,11 @@ module Rotera.Socket
 
 import Control.Concurrent.STM (TVar)
 import Control.Exception (throwIO)
-import Data.Bytes.Types (MutableBytes(..))
-import Rotera.Unsafe (Rotera)
 import Data.ByteString (ByteString)
-import Data.Primitive (MutableByteArray(..),ByteArray,MutablePrimArray(..))
+import Data.Bytes.Types (MutableBytes(..))
+import Data.Word (Word16)
+import Rotera.Unsafe (Rotera)
+import Data.Primitive (MutableByteArray(..),ByteArray)
 import Data.Primitive (PrimArray,SmallArray,Prim)
 import Data.Word (Word32,Word64)
 import GHC.Exts (RealWorld)
@@ -37,7 +38,6 @@ import qualified Data.ByteString.Char8 as BC
 import qualified Data.Bytes.Unsliced as BU
 import qualified Socket.Stream.Uninterruptible.MutableBytes as SMB
 import qualified Rotera.Nonblocking as NB
-import qualified GHC.Exts as E
 import qualified Rotera
 
 -- TODO: Collapse msgSizes and respBuf into a single
@@ -65,8 +65,12 @@ data Dynamic = Dynamic
 -- * Reject pushes with more than 2^20 messages
 -- * Cap reads at 2^18 messages
 -- * Cap stream batch sizes at 2^18 messages
+
+-- | Start a rotera server on 127.0.0.1
 server ::
-     TVar Bool
+     Word16
+     -- ^ Port at which the server will listen.
+  -> TVar Bool
      -- ^ Interrupt. When this becomes @True@, stop accepting
      -- new connections and gracefully close all open
      -- connections.
@@ -76,9 +80,9 @@ server ::
      -- ^ Metadata for each queue, must be the same
      -- length as the queue resolver.
   -> IO ()
-server intr resolver roteras = do
+server p intr resolver roteras = do
   e <- SCK.withListener
-    Peer{address=IPv4.loopback,port=8245}
+    Peer{address=IPv4.loopback,port=p}
     (\lstn prt -> do
       BC.putStr $ BC.concat
         [ "[localhost][info] Listening on port "
@@ -103,18 +107,18 @@ server intr resolver roteras = do
                   [ BU.toByteString descr
                   , "[info] Established connection.\n"
                   ]
-                reqBuf <- PM.newByteArray reqSz
+                reqBufStatic <- PM.newByteArray reqSz
                 respBuf <- PM.newByteArray 8
                 let static = Static
-                      intr conn descr reqBuf respBuf resolver roteras
+                      intr conn descr reqBufStatic respBuf resolver roteras
                 -- No real reason for the reqBuf to start at 64 bytes.
                 -- It must be at least 32 bytes to handle requests.
-                reqBuf <- PM.newByteArray 64 
+                reqBufDynamic <- PM.newByteArray 64
                 -- The payload buffer really should start at zero. Not
                 -- for correctness but because there is no way to
                 -- estimate the size of what we will be receiving.
                 payloadBuf <- PM.newByteArray 0
-                handleConnection static (Dynamic reqBuf payloadBuf)
+                handleConnection static (Dynamic reqBufDynamic payloadBuf)
                 pure descr
               )
             case e of
@@ -189,7 +193,7 @@ handleConnection static@(Static intr conn descr reqBuf respBuf resolver roteras)
                   -- TODO: Attempt to load the payload directly into
                   -- the mmapped region.
                   let msgSzVec :: PV.MVector RealWorld (Fixed 'LittleEndian Word32)
-                      msgSzVec = PV.MVector 0 msgCount msgSizes1 
+                      msgSzVec = PV.MVector 0 msgCount msgSizes1
                   payloadSz <- vecFoldl
                     (\x y -> pure (x + fromIntegral y))
                     (0 :: Int)
@@ -347,9 +351,6 @@ ensureCapacity m needed = do
     then PM.newByteArray needed
     else pure m
 
-untype :: MutablePrimArray s a -> MutableByteArray s
-untype (MutablePrimArray x) = MutableByteArray x
-
 printPrefixed :: ByteArray -> ByteString -> IO ()
 printPrefixed descr msg = BC.putStr $ BC.concat
   [ BU.toByteString descr
@@ -429,23 +430,23 @@ decodeReq arr = do
       Fixed msgCount <- PM.readByteArray arr 3 :: IO (Fixed 'LittleEndian Word64)
       pure (Just (ReadStream queue msgsPerChunk firstIdent msgCount))
     _ -> pure Nothing
-  
+
 intrToIdent :: Bool -> Word64
 intrToIdent = \case
   True -> shutdownIdent
   False -> aliveIdent
 
-readIdent :: Word64
-readIdent = 0x7a23663364b9d865
+_readIdent :: Word64
+_readIdent = 0x7a23663364b9d865
 
-streamIdent :: Word64
-streamIdent = 0xbd4a8ffdc74673dd
+_streamIdent :: Word64
+_streamIdent = 0xbd4a8ffdc74673dd
 
-pingIdent :: Word64
-pingIdent = 0x44adba9e22c5cf56
+_pingIdent :: Word64
+_pingIdent = 0x44adba9e22c5cf56
 
-pushIdent :: Word64
-pushIdent = 0x70bbf8926f2a1ec6
+_pushIdent :: Word64
+_pushIdent = 0x70bbf8926f2a1ec6
 
 shutdownIdent :: Word64
 shutdownIdent = 0x024d91a955128d3a
@@ -453,8 +454,8 @@ shutdownIdent = 0x024d91a955128d3a
 aliveIdent :: Word64
 aliveIdent = 0x6063977ea508edcc
 
-commitIdent :: Word64
-commitIdent = 0xfc54160306bf77d4
+_commitIdent :: Word64
+_commitIdent = 0xfc54160306bf77d4
 
 vecFoldl :: Prim a => (b -> a -> IO b) -> b -> PV.MVector RealWorld a -> IO b
 vecFoldl f !b0 !v = go 0 b0 where

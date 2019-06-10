@@ -58,6 +58,7 @@ with rec {
                [ (beginsWith ".ghc") ]
                [ (hasExtension ".sh") ]
                [ (hasExtension ".txt") ]
+               [ (hasExtension ".project") ]
              ]);
            src = lib.cleanSource path;
          }
@@ -160,6 +161,17 @@ with rec {
       apply = [ hlib.dontCheck ];
     };
 
+    primitive-checked = hself.callC2N {
+      name = "primitive-checked";
+      rawPath = super.fetchFromGitHub {
+        owner  = "haskell-primitive";
+        repo   = "primitive-checked";
+        rev = "d136c5223be331c21c51769eb0be0c85bc6feee6";
+        sha256 = "179knm68zl0ajj744j7g8n8fxd6gjwmv5128xmh9ci7hg6diwarm";
+      };
+      apply = [ hlib.dontCheck ];
+    };
+
     primitive-addr = hself.callC2N {
       name = "primitive-addr";
       rawPath = super.fetchFromGitHub {
@@ -191,28 +203,6 @@ with rec {
         sha256 = "1k3xh89xl0vymnlad4z0lpyq389znk19mwc3zrbr3j4cg0284i4z";
       };
       apply = [ hlib.dontCheck ];
-    };
-
-    teleshell = hself.callC2N {
-      name = "teleshell";
-      rawPath = super.fetchFromGitHub {
-        owner  = "andrewthad";
-        repo   = "teleshell";
-        rev    = "b849195fc80e6d14f6482808e3359e310ceab037";
-        sha256 = "0l56whaf7ykw009rxkz4b19np4h52kbmjr88rl9c8yzvjrmy1hyx";
-      };
-      apply = [ ];
-    };
-
-    bytestring-substring = hself.callC2N {
-      name = "bytestring-substring";
-      rawPath = super.fetchFromGitHub {
-        owner  = "chessai";
-        repo   = "bytestring-substring";
-        rev    = "8d2be32803c1c150f4586df4d6ca52f46d67f270";
-        sha256 = "0hisns06syvp6lcgpkbrffmibglvqxsq71izddjsan1b2hkwd9yw";
-      };
-      apply = [ hlib.doJailbreak ];
     };
 
     sockets = hlib.overrideCabal (hself.callC2N {

@@ -15,26 +15,24 @@ module Rotera
   ) where
 
 import Prelude hiding (read)
-import Rotera.Unsafe (Discourse(..),Rotera(..),ReadTicket(..),EventRange(..))
+import Rotera.Unsafe (Rotera(..),ReadTicket(..),EventRange(..))
 import Rotera.Unsafe (WriterLock(..))
 
-import Control.Concurrent.STM (STM,TVar)
+import Control.Concurrent.STM (TVar)
 import Control.Monad (when)
-import Control.Monad.ST (runST,ST)
+import Control.Monad.ST (runST)
 import Data.Primitive (Prim)
 import Data.ByteString (ByteString)
 import Data.Bytes.Types (MutableBytes(..))
-import Data.Primitive (MutableByteArray,ByteArray)
-import Data.Primitive (SmallArray,PrimArray,MutablePrimArray)
+import Data.Primitive (ByteArray)
+import Data.Primitive (SmallArray,MutablePrimArray)
 import Data.Primitive.Addr (Addr)
-import Data.Word (Word32)
 import GHC.Exts (Addr#,MutableByteArray#,Ptr(..),RealWorld,unsafeCoerce#)
 
 import qualified Control.Concurrent.STM as STM
 import qualified Foreign.ForeignPtr as FP
 import qualified GHC.ForeignPtr as FP
 import qualified System.IO.MMap as MM
-import qualified Data.Primitive.PrimArray.Atomic as PM
 import qualified Data.Primitive.Addr as PM
 import qualified Data.Primitive as PM
 import qualified Data.Primitive.Ptr as PM
