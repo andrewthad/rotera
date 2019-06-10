@@ -134,5 +134,4 @@ executable rotera-repl
     , repline >= 0.2 && < 0.3
     , rotera
     , sockets
-    , vector
 
