@@ -1,8 +1,8 @@
 {-# language BangPatterns #-}
-{-# language NamedFieldPuns #-}
-{-# language LambdaCase #-}
-{-# language OverloadedStrings #-}
 {-# language DuplicateRecordFields #-}
+{-# language LambdaCase #-}
+{-# language NamedFieldPuns #-}
+{-# language OverloadedStrings #-}
 {-# language TypeApplications #-}
 
 import Control.Monad.IO.Class (liftIO)
@@ -18,16 +18,16 @@ import System.IO.Unsafe (unsafePerformIO)
 import Text.Read (readMaybe)
 
 import qualified Data.ByteString as B
-import qualified Data.ByteString.Encodings as BE
 import qualified Data.ByteString.Char8 as BC8
+import qualified Data.ByteString.Encodings as BE
 import qualified Data.Bytes.Mutable.Unsliced as MB
 import qualified Data.Bytes.Unsliced as BU
 import qualified Data.Char as Char
 import qualified Data.Primitive.Contiguous as C
 import qualified Data.Primitive.Unlifted.Array as PM
 import qualified GHC.OldList as L
-import qualified Options.Applicative as P
 import qualified Net.IPv4 as IPv4
+import qualified Options.Applicative as P
 import qualified Rotera.Client as R
 import qualified Socket.Stream.IPv4 as SCK
 
