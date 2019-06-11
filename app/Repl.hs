@@ -8,7 +8,7 @@
 import Data.Coerce (coerce)
 import Control.Monad.IO.Class (liftIO)
 import Data.IORef
-import Data.Word (Word16, Word32)
+import Data.Word (Word16, Word32, Word64)
 import Prelude hiding (read)
 import Rotera.Client (RoteraException,Message(..),Queue(..),Batch(..),Status(..))
 import Socket.Stream.IPv4 (Peer(..))
@@ -230,6 +230,35 @@ push conn (x:_) = liftIO $ do
     Right () -> do
       () <$ R.commit conn currentQueue
 push _ _ = liftIO $ putStr (mal "push")
+
+{-
+readAt :: SCK.Connection -> [String] -> Repl ()
+readAt conn (x:_) = liftIO $ do
+  case readMaybe @Word64 x of
+    Nothing -> putStr (mal "read-at")
+    Just b -> do
+      currentQueue <- readIORef queueRef
+      currentPrintIds <- readIORef printIdsRef
+      R.ping conn currentQueue >>= \case
+        Left err -> do
+          putStr $ errPing err
+        Right {} -> do
+          b' <- readIORef batchRef
+          R.read conn currentQueue (Message b) b' >>= \case
+            Left err -> do
+              putStr $ errRead err
+            Right Batch{start,messages} -> do
+              flip PM.itraverseUnliftedArray_ messages $ \ix msg -> do
+                let prefix = if currentPrintIds == On
+                      then lpad 11 (show (R.getMessage start + fromIntegral ix)) ++ " "
+                      else ""
+                putStr prefix
+                let msg' = BU.toByteString msg
+                if BE.isUtf8 msg'
+                  then BC8.putStrLn msg'
+                  else putStr errNonUtf8
+readAt _ _ = liftIO $ putStr (mal "read-at")
+-}
 
 readBatch :: SCK.Connection -> [String] -> Repl ()
 readBatch conn (x:_) = liftIO $ do
