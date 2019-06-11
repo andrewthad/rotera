@@ -5,11 +5,12 @@
 {-# language OverloadedStrings #-}
 {-# language TypeApplications #-}
 
+import Data.Coerce (coerce)
 import Control.Monad.IO.Class (liftIO)
 import Data.IORef
-import Data.Word (Word16, Word32, Word64)
+import Data.Word (Word16, Word32)
 import Prelude hiding (read)
-import Rotera.Client (RoteraException,Queue(..),Batch(..),Status(..))
+import Rotera.Client (RoteraException,Message(..),Queue(..),Batch(..),Status(..))
 import Socket.Stream.IPv4 (Peer(..))
 import System.ByteOrder (Fixed(..))
 import System.Console.Repline
@@ -30,6 +31,7 @@ import qualified Net.IPv4 as IPv4
 import qualified Options.Applicative as P
 import qualified Rotera.Client as R
 import qualified Socket.Stream.IPv4 as SCK
+import qualified System.Console.ANSI as ANSI
 
 data OnOff = On | Off
   deriving (Eq, Show)
@@ -94,6 +96,7 @@ completer n = do
         , "push"
         , "ping"
         , "current"
+        , "clear", "cls"
         , "help"
         , "quit"
         ]
@@ -110,6 +113,7 @@ helpStr = mconcat
   , "    :push <msg>          -- push `msg` and commit\n"
   , "    :ping                -- ping rotera-server and return the most recent commit.\n"
   , "    :current             -- show current settings.\n"
+  , "    :clear, :cls         -- clear the screen.\n"
   , "    :help, :h            -- display this help menu\n"
   , "    :quit, :q            -- close the connection to rotera-server and quit the repl\n"
   ]
@@ -126,6 +130,7 @@ options conn =
   , ("current", current)
   , ("batch", batch)
   , ("print-ids", printIds)
+  , ("clear", clear), ("cls", clear)
   ]
 
 help :: [String] -> Repl ()
@@ -135,6 +140,9 @@ quit :: [String] -> Repl ()
 quit = const $ liftIO $ do
   putStr "Exiting rotera-repl...\n"
   exitSuccess
+
+clear :: [String] -> Repl ()
+clear = const $ liftIO $ ANSI.clearScreen
 
 queue :: [String] -> Repl ()
 queue xs = liftIO $ go xs
@@ -245,7 +253,7 @@ readBatch conn (x:_) = liftIO $ do
                 putStr prefix
                 let msg' = BU.toByteString msg
                 if BE.isUtf8 msg'
-                  then B.putStrLn msg
+                  then BC8.putStrLn msg'
                   else putStr errNonUtf8
 readBatch _ _ = liftIO $ putStr (mal "read-batch")
 
@@ -258,7 +266,7 @@ read conn [] = liftIO $ do
     Left err -> do
       putStr $ errPing err
     Right R.Status{next} -> do
-      R.read conn currentQueue next b >>= \case
+      R.read conn currentQueue (Message (coerce next - fromIntegral b)) b >>= \case
         Left err -> do
           putStr $ errRead err
         Right Batch{start,messages} -> do
@@ -269,7 +277,7 @@ read conn [] = liftIO $ do
             putStr prefix
             let msg' = BU.toByteString msg
             if BE.isUtf8 msg'
-              then B.putStrLn msg
+              then BC8.putStrLn msg'
               else putStr errNonUtf8
 read _ _ = liftIO $ putStr (mal "read")
 
