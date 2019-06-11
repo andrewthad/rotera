@@ -117,6 +117,10 @@ with rec {
       ];
     });
 
+    ansi-terminal = hsuper.ansi-terminal_0_9_1;
+
+    concurrent-output = hlib.doJailbreak hsuper.concurrent-output;
+
     byte-order = hself.callC2N {
       name = "byte-order";
       rawPath = super.fetchFromGitHub {
@@ -271,7 +275,7 @@ with rec {
 
     country = hlib.doJailbreak hsuper.country;
 
-    semirings = hsuper.semirings_0_3_1_2;
+    semirings = hsuper.semirings_0_4_2;
 
     http-client = hself.callC2N {
       name = "http-client";
