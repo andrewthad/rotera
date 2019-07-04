@@ -41,9 +41,31 @@ following ways:
 | Persistence        | Keeps last n messages | Keeps messages based on time |
 | finish this table  | finish this table     | finish this table            |
 
+We believe that eventually rotera will be preferable to Apache Kafka if a single node is sufficient to handle your
+throughput, i.e. your throughput does not warrant the need for a distributed system, because of Rotera's significantly
+smaller API (functions, configuration).
+
+## API
+
+Rotera's API is made up of 5 functions, and a few simple configuration options.
+
+### Functions
+
+* `ping`: ping the server (simple health check).
+* `commit`: ping the server, commit the most recent message id.
+            note that the repl always commits after a push.
+* `read`: read a batch of messages out of a queue.
+* `push` : push a batch of messages to a queue (does not necessarily make a commit).
+           note that the repl always commits after a push.
+* `stream` : stream chunks of messages from a stream socket until a certain number of messages has been reached.
+             note that this is not supported by the repl.
+  
+### Configuration
+TODO
+
 ## Building
 
-<i>Note</i>: Rotera should only work on Linux right now. Support for other operating systems is welcome, though we expect
+<i>Note</i>: Rotera should only work on Linux right now. Adding support for other operating systems is welcome, though we expect
 Windows support to be non-trivial.
 
 ### Cabal
