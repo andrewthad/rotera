@@ -69,7 +69,7 @@ run p = do
     repl
   case e of
     Left err -> do
-      putStr $ "Failure when executing repl.\n"
+      putStr $ "Failure when starting repl.\n"
       putStr $ "Error was: " <> show err <> "\n"
       exitFailure
     Right () -> pure ()
